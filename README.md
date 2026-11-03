@@ -3,6 +3,8 @@
 Status: works end to end in the NESP32 build of Mesen against live AISHub
 data. Not yet tried on a real console.
 
+Play it in a browser: https://harbor.cultofjames.org
+
 Ships on your NES. NES Harbor shows the vessels around a harbor on an
 NES-pixel map of the coast, live, through a [NESP32](https://nesp32.retrobits.tv/) Wi-Fi
 board in controller port 2. Pick a port from the list (or type a US zip
@@ -40,8 +42,10 @@ On the map:
 | Button | Does |
 |---|---|
 | Up / Down | pick a ship |
+| A (tap) | the ship's card: name, MMSI, IMO, call sign, flag, type, status, destination, ETA, size, draft, speed, course, position |
 | Left / Right | range, at once |
 | A held + D-pad | move the map a quarter of the range |
+| B (on a card) | back to the map |
 | B | back to the picker |
 
 The map is OpenStreetMap's, turned by the NESP32 into land and water

@@ -893,6 +893,7 @@ radar_editor:                     ; nes/radar_link.inc comes back here
 ; leaves the program, so that B pressed again and again cannot.
 .proc update_selection
     jsr latch_controller
+    jsr card_watch              ; A tapped: the ship's card
     lda controller_pending
     sta controller_pressed
     lda #0
@@ -918,6 +919,8 @@ radar_editor:                     ; nes/radar_link.inc comes back here
     and #PAD_DIRECTIONS
     beq @not_pan
     jsr harbor_pan
+    lda #0                      ; a pan is no tap
+    sta card_armed
     jmp @ranged
 @not_pan:
     lda controller_pressed      ; LEFT and RIGHT: the range, at once; UP and
@@ -2565,6 +2568,7 @@ radar_editor:                     ; nes/radar_link.inc comes back here
 .include "harbor_data.inc"
 .include "radar_link.inc"
 .include "harbor_map.inc"
+.include "harbor_card.inc"
 .include "music.inc"
 
 .segment "BANKDATA"

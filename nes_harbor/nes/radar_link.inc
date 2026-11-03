@@ -308,6 +308,11 @@ radar_messages:
     jsr update_selection        ; B asks for the editor
     lda navigation_requested
     bne @leave
+    lda card_wanted             ; A tapped: the ship's card, then the map again
+    beq :+
+    jsr ship_card
+    jmp radar_scope
+:
     jsr age_link
     bcc :+
     jsr commit_display          ; ten seconds with nothing: WAITING
