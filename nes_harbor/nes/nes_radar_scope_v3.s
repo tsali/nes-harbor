@@ -1,0 +1,2567 @@
+; NES Radar Scope v2 -- LDV display layer
+;
+; Starts with a controller-1 ICAO editor, then asks a nesp32 on controller
+; port 2 for the airport and its aircraft (nes/radar_link.inc).
+
+.setcpu "6502"
+
+PPUCTRL   = $2000
+PPUMASK   = $2001
+PPUSTATUS = $2002
+OAMADDR   = $2003
+PPUSCROLL = $2005
+PPUADDR   = $2006
+PPUDATA   = $2007
+OAMDMA    = $4014
+JOY1      = $4016
+JOY2      = $4017
+DMC_FREQ  = $4010
+APUSTATUS = $4015
+
+MAX_TARGETS       = 8
+RECORD_SIZE       = 9
+IDENTITY_RECORD_SIZE = 25
+MAX_PAYLOAD       = 200
+
+SCENE_STALE       = $01
+SCENE_SEVERE      = $1C
+TRACK_INVALID     = $08
+ALT_INVALID       = $10
+SPEED_INVALID     = $20
+
+PPUCTRL_SPR_8X16  = %00100000
+PPUCTRL_UPDATE_NMI = %10100000
+SHOW_SCOPE        = %00011110
+SHOW_BACKGROUND   = %00001010
+SHOW_STARTUP      = %00011110
+
+CHAR_SPACE        = 0
+CHAR_0            = 1
+CHAR_A            = 11
+CHAR_PLUS         = 37
+CHAR_HYPHEN       = 38
+CHAR_DOT          = 39
+CHAR_SLASH        = 40
+CHAR_COLON        = 41
+
+STARTUP_CODE_ADDR   = $218E      ; row 12, column 14
+STARTUP_CURSOR_ADDR = $21AE      ; row 13, column 14
+STARTUP_MESSAGE_ADDR = $21E8     ; row 15, column 8
+STARTUP_SPRITE_Y    = 12 * 8 - 1
+STARTUP_SPRITE_X    = 14 * 8
+STARTUP_SPRITE_PALETTE = 2
+
+SCOPE_ORIGIN_X    = 56
+SCOPE_ORIGIN_Y    = 24
+META_CENTRE_X     = 7
+META_CENTRE_Y     = 7
+META_LDV_OFFSET_X_LEFT  = SCOPE_ORIGIN_X - META_CENTRE_X
+META_LDV_OFFSET_X_RIGHT = META_LDV_OFFSET_X_LEFT + 8
+META_LDV_OFFSET_Y       = SCOPE_ORIGIN_Y - META_CENTRE_Y - 1
+
+SEL_TGT  = 0
+SEL_TYPE = 2
+SEL_REG  = 6
+SEL_SQWK = 12
+SEL_CAT  = 16
+SEL_ALT  = 18
+SEL_SPD  = 23
+SEL_TRK  = 26
+SEL_VS   = 29
+SEL_DIST = 34
+
+STATUS_COUNT = 0
+STATUS_APT   = 2
+STATUS_LINK  = 6
+LINK_STATE_WIDTH = 9
+STATUS_SIZE       = STATUS_LINK + LINK_STATE_WIDTH
+
+BUTTON_A          = $80
+BUTTON_B          = $40
+BUTTON_SELECT     = $20
+BUTTON_START      = $10
+BUTTON_UP         = $08
+BUTTON_DOWN       = $04
+BUTTON_LEFT       = $02
+BUTTON_RIGHT      = $01
+
+
+LINK_STALE_FRAMES     = 600       ; 10 seconds without a valid packet
+LINK_DOT_FRAMES       = 8         ; between one dot after LIVE and the next
+LINK_STREAM_STEPS     = 4         ; one, two, three dots and LIVE again: about
+                                  ; half a second for each new piece of data
+SPLASH_FRAMES         = 120       ; about two seconds at NTSC field rate
+CHR_BANK_SPLASH       = 0
+CHR_BANK_RADAR        = 1
+
+; Splash name and version stamp.  The splash bank is a bitmap of the LDV logo
+; and has no font, so the glyphs are copied out of the LDV font into the tiles it
+; leaves unused at the top of the bank (see the CHR0 segment).  Digits are
+; contiguous, so VER_0 + n is the tile for digit n.  Tile $00 is blank in this
+; bank, which makes it the space.
+VER_GLYPH_BASE        = $E6
+VER_GLYPH_COUNT       = 21        ; ten digits, '.', 'V', then N E S R A D H B O
+VER_0                 = VER_GLYPH_BASE
+VER_DOT               = VER_GLYPH_BASE + 10
+VER_V                 = VER_GLYPH_BASE + 11
+VER_N                 = VER_GLYPH_BASE + 12
+VER_E                 = VER_GLYPH_BASE + 13
+VER_S                 = VER_GLYPH_BASE + 14
+VER_R                 = VER_GLYPH_BASE + 15
+VER_A                 = VER_GLYPH_BASE + 16
+VER_D                 = VER_GLYPH_BASE + 17
+VER_H                 = VER_GLYPH_BASE + 18
+VER_B                 = VER_GLYPH_BASE + 19
+VER_O                 = VER_GLYPH_BASE + 20
+VER_SPACE             = $00
+SPLASH_TITLE_ADDR     = $232B     ; row 25, column 11
+VERSION_STAMP_ADDR    = $236D     ; row 27, column 13 -- one blank row below
+
+.include "ldv_screen.inc"
+.include "harbor_text.inc"
+.include "assets_metasprite.inc"
+
+.segment "ZEROPAGE"
+packet_flags:   .res 1
+packet_count:   .res 1
+temp:           .res 1
+record_flags:   .res 1
+slot_number:    .res 1
+records_left:   .res 1
+seen_slots:     .res 1
+panel_offset:   .res 1
+value_lo:       .res 1
+value_hi:       .res 1
+digit_hundreds: .res 1
+digit_tens:     .res 1
+digit_ones:     .res 1
+rec_offset:     .res 1
+meta_left:      .res 1
+meta_right:     .res 1
+vblank_ready:   .res 1
+controller_current: .res 1
+controller_previous: .res 1
+controller_pressed: .res 1
+controller_pending: .res 1
+editor_index:   .res 1
+picker_port:    .res 1        ; the port in the list; PORT_COUNT for a zip code
+picker_mode:    .res 1        ; 0 the list, 1 the zip code's digits
+range_index:    .res 1        ; of harbor_ranges
+place_ptr:      .res 2
+startup_error:  .res 1
+field_src:      .res 2
+field_width:    .res 1
+field_font:     .res 1
+field_addr_hi:  .res 1
+field_addr_lo:  .res 1
+active_slots:   .res 1
+selected_slot:  .res 1
+previous_selected_slot: .res 1
+oam_rotation:   .res 1
+track_value:    .res 1
+table_slot_index: .res 1
+table_rows_left: .res 1
+displayed_count: .res 1
+link_age_lo:     .res 1
+link_age_hi:     .res 1
+link_timed_out:  .res 1
+link_live:       .res 1           ; the LINK field says LIVE
+link_stream:     .res 1           ; dot steps left: new scenes are coming
+link_dot_timer:  .res 1
+link_dots:       .res 1
+link_dirty:      .res 1           ; the dots have changed and are not on screen
+navigation_requested: .res 1
+
+.segment "BSS"
+.align 256
+oam_shadow:     .res 256
+scene_payload:  .res MAX_PAYLOAD
+identity_tiles: .res 192
+icao_code:      .res 4
+selected_fields: .res 37
+status_fields:   .res STATUS_SIZE
+startup_cursor:  .res ZIP_LEN
+zip_code:        .res ZIP_LEN  ; ASCII digits
+picker_tiles:    .res ZIP_LEN + 2
+splash_frames:   .res 1
+
+.segment "HEADER"
+    .byte "NES", $1A
+    .byte 2                       ; 32 KiB fixed PRG
+.ifdef CART
+    .byte 2                       ; the splash's tiles and the scope's, once each
+    .byte $10, $00                ; a part of nesp32's cartridge, which is an MMC1
+.else
+    .byte 4                       ; four 8 KiB CHR-ROM banks
+    .byte $30, $00                ; mapper 3 CN-ROM, horizontal mirroring
+.endif
+    .res 8, $00
+
+.segment "CODE"
+
+.proc reset
+    sei
+    cld
+    ldx #$40
+    stx JOY2
+    ldx #$FF
+    txs
+    inx
+    stx PPUCTRL
+    stx PPUMASK
+    stx DMC_FREQ
+    stx APUSTATUS
+    txa                           ; all of RAM from nothing: power-on RAM is
+:                                 ; anything, and the keys typed are counted in it
+    sta $0000,x                   ; (nothing has been pushed yet, so the stack
+    sta $0100,x                   ; page goes too)
+    sta $0200,x
+    sta $0300,x
+    sta $0400,x
+    sta $0500,x
+    sta $0600,x
+    sta $0700,x
+    inx
+    bne :-
+
+    stx radar_id                  ; no airport chosen, and no hello said
+    stx radar_greeted
+    stx radar_chosen
+    lda #OUT0_MARK                ; the line to the nesp32 leaves break
+    sta JOY1
+
+    bit PPUSTATUS
+@wait_vblank_1:
+    bit PPUSTATUS
+    bpl @wait_vblank_1
+@wait_vblank_2:
+    bit PPUSTATUS
+    bpl @wait_vblank_2
+
+    lda #0                        ; the first port, at HARBOR's own range
+    sta picker_port
+    lda #RANGE_DEFAULT
+    sta range_index
+    ldx #ZIP_LEN - 1
+:
+    lda zip_default,x
+    sta zip_code,x
+    dex
+    bpl :-
+    lda #0
+    sta startup_error
+    sta active_slots
+    sta selected_slot
+    sta previous_selected_slot
+    sta oam_rotation
+    sta controller_pending
+    sta displayed_count
+    sta link_age_lo
+    sta link_age_hi
+    sta link_timed_out
+    sta navigation_requested
+    lda #1
+    jsr initialize_display_buffers
+    jsr initialize_splash_video
+    jsr wait_splash
+    jsr radar_recall              ; the picker begins at the place the nesp32 kept
+
+radar_editor:                     ; nes/radar_link.inc comes back here
+@show_editor:
+    jsr initialize_startup_video
+    lda #0
+    sta editor_index
+    sta picker_mode
+    sta navigation_requested
+    jsr read_controller           ; a button still held from the scope, or from
+    lda controller_current        ; Start, is not a press
+    sta controller_previous
+    jsr render_editor
+    lda startup_error
+    beq @editor_loop
+    jsr radar_show_error          ; which of the reasons there was no scope
+
+@editor_loop:
+    inc radar_key_turn          ; every other frame, what is typed: before the
+    lda radar_key_turn          ; vblank, which the editor's writes are for
+    lsr a
+    bcc :+
+    jsr radar_editor_keys
+:
+    jsr wait_vblank
+    jsr read_controller
+    lda controller_previous
+    eor #$FF
+    and controller_current
+    sta controller_pressed
+    lda controller_current
+    sta controller_previous
+    jsr radar_editor_key        ; a key typed on the Bluetooth keyboard: a
+    bcs :+                      ; letter or a digit
+    jsr picker_typed
+    jmp @editor_changed
+:
+    ora controller_pressed      ; or the buttons it stands for
+    sta controller_pressed
+.ifdef CART
+    and #BUTTON_SELECT
+    beq :+
+    jmp to_cart_menu
+:
+.endif
+    lda picker_mode
+    bne @zip
+
+    ; The list: UP and DOWN go through the ports, and the zip code after
+    ; them; LEFT and RIGHT the range. Start or A: that port, or the zip
+    ; code's digits.
+    lda controller_pressed
+    and #(BUTTON_START | BUTTON_A)
+    beq @list_moves
+    lda picker_port
+    cmp #PORT_COUNT
+    beq :+
+    jmp @submit
+:
+    lda #1
+    sta picker_mode
+    lda #0
+    sta editor_index
+    jmp @editor_changed
+@list_moves:
+    lda controller_pressed
+    and #BUTTON_UP
+    bne @port_up
+    lda controller_pressed
+    and #BUTTON_DOWN
+    bne @port_down
+    lda controller_pressed
+    and #BUTTON_LEFT
+    bne @range_down
+    lda controller_pressed
+    and #BUTTON_RIGHT
+    bne @range_up
+    jmp @editor_loop
+
+@port_up:
+    lda picker_port
+    bne :+
+    lda #PORT_COUNT + 1
+:
+    sec
+    sbc #1
+    sta picker_port
+    jmp @editor_changed
+@port_down:
+    lda picker_port
+    cmp #PORT_COUNT
+    bcc :+
+    lda #$FF
+:
+    clc
+    adc #1
+    sta picker_port
+    jmp @editor_changed
+@range_down:
+    lda range_index
+    beq :+
+    dec range_index
+:
+    jmp @editor_changed
+@range_up:
+    lda range_index
+    cmp #RANGE_COUNT - 1
+    bcs :+
+    inc range_index
+:
+    jmp @editor_changed
+
+    ; The zip code: UP and DOWN the digit, LEFT and RIGHT which, Start or
+    ; A to look it up, and B back to the list.
+@zip:
+    lda controller_pressed
+    and #(BUTTON_START | BUTTON_A)
+    beq :+
+    jmp @submit
+:
+    lda controller_pressed
+    and #BUTTON_B
+    beq :+
+    lda #0
+    sta picker_mode
+    jmp @editor_changed
+:
+    lda controller_pressed
+    and #BUTTON_UP
+    bne @digit_up
+    lda controller_pressed
+    and #BUTTON_DOWN
+    bne @digit_down
+    lda controller_pressed
+    and #BUTTON_RIGHT
+    bne @move_right
+    lda controller_pressed
+    and #BUTTON_LEFT
+    bne @move_left
+    jmp @editor_loop
+
+@digit_up:
+    ldx editor_index
+    lda zip_code,x
+    cmp #'9'
+    bne :+
+    lda #'0' - 1
+:
+    clc
+    adc #1
+    sta zip_code,x
+    jmp @editor_changed
+
+@digit_down:
+    ldx editor_index
+    lda zip_code,x
+    cmp #'0'
+    bne :+
+    lda #'9' + 1
+:
+    sec
+    sbc #1
+    sta zip_code,x
+    jmp @editor_changed
+
+@move_right:
+    jsr zip_cursor_right
+    jmp @editor_changed
+
+@move_left:
+    lda editor_index
+    bne :+
+    lda #ZIP_LEN
+    sta editor_index
+:
+    dec editor_index
+
+@editor_changed:
+    lda #0
+    sta startup_error
+    jsr render_editor
+    jmp @editor_loop
+
+@submit:
+    jsr picker_tag                ; the scope's corner says where
+    jmp radar_submit              ; the place and the scope, over the nesp32's link
+.endproc
+
+.proc zip_cursor_right
+    inc editor_index
+    lda editor_index
+    cmp #ZIP_LEN
+    bcc :+
+    lda #0
+    sta editor_index
+:
+    rts
+.endproc
+
+; A key typed in the editor, A its ASCII: a capital or a digit. A digit
+; goes into the zip code where the cursor is, and from the list begins
+; one. A letter in the list goes to the next port with that initial.
+.proc picker_typed
+    cmp #'A'
+    bcs @letter
+    ldx picker_mode
+    bne @digit
+    ldx #PORT_COUNT               ; from the list: a new zip code
+    stx picker_port
+    ldx #1
+    stx picker_mode
+    ldx #0
+    stx editor_index
+@digit:
+    ldx editor_index
+    sta zip_code,x
+    jmp zip_cursor_right
+
+@letter:
+    ldx picker_mode
+    bne @done
+    sec
+    sbc #'A' - CHAR_A             ; the letter's glyph, as the names hold it
+    sta temp
+    lda #PORT_COUNT
+    sta value_hi                  ; ports left to look at
+@next:
+    inc picker_port
+    lda picker_port
+    cmp #PORT_COUNT
+    bcc :+
+    lda #0
+    sta picker_port
+:
+    dec value_hi
+    bmi @done                     ; round them all: none
+    jsr port_name_pointer
+    ldy #0
+    lda (place_ptr),y
+    cmp temp
+    bne @next
+@done:
+    rts
+.endproc
+
+; place_ptr = the name of picker_port in the list, or the zip code's line.
+.proc port_name_pointer
+    lda picker_port
+    cmp #PORT_COUNT
+    bcc :+
+    lda #<zip_entry_name
+    sta place_ptr
+    lda #>zip_entry_name
+    sta place_ptr + 1
+    rts
+:
+    tax
+    lda #<port_names
+    sta place_ptr
+    lda #>port_names
+    sta place_ptr + 1
+    cpx #0
+    beq @done
+@add:
+    lda place_ptr
+    clc
+    adc #PORT_NAME_LEN
+    sta place_ptr
+    bcc :+
+    inc place_ptr + 1
+:
+    dex
+    bne @add
+@done:
+    rts
+.endproc
+
+; place_ptr = picker_port's middle in port_places: eight bytes.
+.proc port_place_pointer
+    lda picker_port
+    asl a
+    asl a
+    asl a
+    clc
+    adc #<port_places
+    sta place_ptr
+    lda #>port_places
+    adc #0
+    sta place_ptr + 1
+    rts
+.endproc
+.assert PORT_COUNT * 8 <= 256, error, "a port's place is found by its index times eight"
+
+; icao_code = what the scope's corner says: the port's tag, or ZIP.
+.proc picker_tag
+    lda picker_port
+    cmp #PORT_COUNT
+    bcc :+
+    ldx #3
+@zip:
+    lda zip_tag,x
+    sta icao_code,x
+    dex
+    bpl @zip
+    rts
+:
+    asl a
+    asl a
+    tay
+    ldx #0
+@tag:
+    lda port_tags,y
+    sta icao_code,x
+    iny
+    inx
+    cpx #4
+    bne @tag
+    rts
+.endproc
+
+
+; Check reserved target flags, coordinate bounds, and unique stable slots.
+; Carry set reports malformed data without changing the displayed scene.
+.proc validate_records
+    lda #0
+    sta seen_slots
+    lda packet_count
+    sta records_left
+    ldy #0
+@record:
+    lda records_left
+    beq @valid
+    lda scene_payload,y
+    bmi @invalid
+    and #$07
+    tax
+    lda slot_masks,x
+    and seen_slots
+    bne @invalid
+    lda slot_masks,x
+    ora seen_slots
+    sta seen_slots
+    lda scene_payload + 1,y
+    cmp #160
+    bcs @invalid
+    lda scene_payload + 2,y
+    cmp #160
+    bcs @invalid
+    lda scene_payload + 7,y
+    cmp #$80                        ; unavailable is valid
+    beq @rate_valid
+    cmp #100                        ; +0 through +99
+    bcc @rate_valid
+    cmp #$9D                        ; $9D through $FF = -99 through -1
+    bcc @invalid
+@rate_valid:
+    lda scene_payload + 8,y
+    cmp #$FF                        ; unavailable is valid
+    beq @distance_valid
+    cmp #100                        ; 0.0 through 9.9 n.m.
+    bcs @invalid
+@distance_valid:
+    tya
+    clc
+    adc #RECORD_SIZE
+    tay
+    dec records_left
+    bne @record
+@valid:
+    clc
+    rts
+@invalid:
+    sec
+    rts
+.endproc
+
+.proc validate_identity_char
+    cmp #' '
+    beq @valid
+    cmp #'-'
+    beq @valid
+    cmp #'0'
+    bcc @invalid
+    cmp #':'
+    bcc @valid
+    cmp #'A'
+    bcc @invalid
+    cmp #'['
+    bcs @invalid
+@valid:
+    clc
+    rts
+@invalid:
+    sec
+    rts
+.endproc
+
+.proc identity_char_tile
+    cmp #' '
+    bne :+
+    lda #CHAR_SPACE
+    rts
+:
+    cmp #'-'
+    bne :+
+    lda #CHAR_HYPHEN
+    rts
+:
+    cmp #'A'
+    bcs @letter
+    sec
+    sbc #'0'
+    clc
+    adc #CHAR_0
+    rts
+@letter:
+    sec
+    sbc #'A'
+    clc
+    adc #CHAR_A
+    rts
+.endproc
+
+; Translate validated scene records into the first sixteen OAM entries. Each
+; stable slot owns two adjacent 8x16 entries forming one 16x16 marker.
+.proc build_oam_shadow
+    ldx #0
+    lda #$FF
+@hide:
+    sta oam_shadow,x
+    inx
+    inx
+    inx
+    inx
+    cpx #64
+    bne @hide
+
+    lda packet_count
+    sta records_left
+    ldy #0
+@record:
+    lda records_left
+    bne :+
+    jmp @done
+:
+    sty rec_offset
+
+    lda scene_payload,y
+    sta record_flags
+    and #$07
+    sta slot_number
+
+    ; Keep the selected marker in the first OAM pair. Rotate the other seven
+    ; complete two-sprite markers around it so scanline overflow flickers like
+    ; an NES-era object group instead of permanently damaging one target.
+    cmp selected_slot
+    beq @selected_priority
+    sec
+    sbc oam_rotation
+    and #7
+    sta temp                       ; cyclic rank of this slot
+    lda selected_slot
+    sec
+    sbc oam_rotation
+    and #7
+    sta panel_offset               ; cyclic rank removed for selected slot
+    lda temp
+    cmp panel_offset
+    bcs @priority_ready
+    clc
+    adc #1                         ; leave OAM pair zero for selected target
+@priority_ready:
+    asl a
+    asl a
+    asl a                          ; rotated OAM position * 8
+    tax
+    jmp @priority_set
+@selected_priority:
+    ldx #0
+@priority_set:
+
+    ; Resolve the independently banked left/right pattern variants.
+    lda record_flags
+    and #TRACK_INVALID
+    beq @have_track
+    lda #META_NO_TRACK_LEFT
+    sta meta_left
+    lda #META_NO_TRACK_RIGHT
+    sta meta_right
+    jmp @variants_ready
+@have_track:
+    lda scene_payload + 3,y
+    clc
+    adc #16                       ; nearest 45-degree sector
+    lsr a
+    lsr a
+    lsr a
+    lsr a
+    lsr a
+    tay
+    lda meta_left_variant,y
+    sta meta_left
+    lda meta_right_variant,y
+    sta meta_right
+@variants_ready:
+    ldy rec_offset
+
+    ; Shared Y for both 8x16 halves.
+    lda scene_payload + 2,y
+    clc
+    adc #META_LDV_OFFSET_Y
+    sta oam_shadow + 0,x
+    sta oam_shadow + 4,x
+
+    ; Left tile: (slot * 6 + variant) << 1 | 1.
+    lda slot_number
+    asl a
+    sta temp                       ; slot * 2
+    asl a
+    clc
+    adc temp
+    clc
+    adc meta_left
+    asl a
+    ora #1                         ; odd tile selects pattern table $1000
+    sta oam_shadow + 1,x
+
+    ; Right tile: (48 + slot * 4 + variant) << 1 | 1.
+    lda slot_number
+    asl a
+    asl a
+    clc
+    adc meta_right
+    clc
+    adc #META_RIGHT_PAIR_BASE
+    asl a
+    ora #1
+    sta oam_shadow + 5,x
+
+    ; Both halves share attributes. Palette 1 belongs only to the selected
+    ; target; packet alert flags do not alter the LDV table-row colours.
+    lda #0
+    sta oam_shadow + 2,x
+    sta oam_shadow + 6,x
+    lda slot_number
+    cmp selected_slot
+    bne @not_selected
+    lda #1
+    sta oam_shadow + 2,x
+    sta oam_shadow + 6,x
+@not_selected:
+
+    ; Two halves are exactly eight pixels apart.
+    lda scene_payload + 1,y
+    clc
+    adc #META_LDV_OFFSET_X_LEFT
+    sta oam_shadow + 3,x
+    lda scene_payload + 1,y
+    clc
+    adc #META_LDV_OFFSET_X_RIGHT
+    sta oam_shadow + 7,x
+
+    tya
+    clc
+    adc #RECORD_SIZE
+    tay
+    dec records_left
+    beq @done
+    jmp @record
+@done:
+    rts
+.endproc
+
+; Clear all dynamic LDV character buffers.
+.proc initialize_display_buffers
+    ldx #0
+    lda #CHAR_SPACE
+@identity:
+    sta identity_tiles,x
+    inx
+    cpx #192
+    bne @identity
+    ldx #0
+@selected:
+    sta selected_fields,x
+    inx
+    cpx #37
+    bne @selected
+    ldx #0
+@status:
+    sta status_fields,x
+    inx
+    cpx #STATUS_SIZE
+    bne @status
+
+    ldx #0
+@airport:
+    lda icao_code,x
+    jsr identity_char_tile
+    sta status_fields + STATUS_APT,x
+    inx
+    cpx #4
+    bne @airport
+    jsr set_link_waiting
+    lda #CHAR_SPACE
+    sta status_fields + STATUS_COUNT
+    lda #CHAR_0
+    sta status_fields + STATUS_COUNT + 1
+    rts
+.endproc
+
+; Poll once after an accepted scene. Down/Right selects the next occupied slot;
+; Up/Left selects the previous; B is back a step, to the editor; and on
+; nesp32's cartridge Select is its menu, as it is from the editor. B never
+; leaves the program, so that B pressed again and again cannot.
+.proc update_selection
+    jsr latch_controller
+    lda controller_pending
+    sta controller_pressed
+    lda #0
+    sta controller_pending
+.ifdef CART
+    lda controller_pressed
+    and #BUTTON_SELECT
+    beq :+
+    jmp to_cart_menu
+:
+.endif
+    lda controller_pressed
+    and #BUTTON_B
+    beq :+
+    lda #1
+    sta navigation_requested
+    rts
+:
+    jmp move_selection
+.endproc
+
+; The slot walk on its own, without the B and Select handling above.
+.proc move_selection
+    lda selected_slot
+    sta previous_selected_slot
+    lda active_slots
+    beq @none
+    ldx selected_slot
+    lda slot_masks,x
+    and active_slots
+    bne @poll
+    ldx #$FF
+@first:
+    inx
+    lda slot_masks,x
+    and active_slots
+    beq @first
+    stx selected_slot
+@poll:
+    lda controller_pressed
+    and #(BUTTON_DOWN | BUTTON_RIGHT)
+    bne @next
+    lda controller_pressed
+    and #(BUTTON_UP | BUTTON_LEFT)
+    bne @previous
+    rts
+@next:
+    ldx selected_slot
+    ldy #8
+@next_slot:
+    inx
+    txa
+    and #7
+    tax
+    lda slot_masks,x
+    and active_slots
+    bne @choose
+    dey
+    bne @next_slot
+    rts
+@previous:
+    ldx selected_slot
+    ldy #8
+@previous_slot:
+    dex
+    txa
+    and #7
+    tax
+    lda slot_masks,x
+    and active_slots
+    bne @choose
+    dey
+    bne @previous_slot
+    rts
+@choose:
+    stx selected_slot
+    rts
+@none:
+    lda #0
+    sta selected_slot
+    rts
+.endproc
+
+
+.proc build_selected_identity
+    lda active_slots
+    beq @done
+    ldx selected_slot
+    lda slot_masks,x
+    and active_slots
+    beq @done
+    lda selected_slot
+    asl a
+    asl a
+    asl a                          ; slot * 8
+    sta temp
+    asl a                          ; slot * 16
+    clc
+    adc temp                       ; slot * 24
+    clc
+    adc #8                         ; aircraft type follows callsign[8]
+    tay
+    ldx #0
+@copy:
+    lda identity_tiles,y
+    sta selected_fields + SEL_TYPE,x
+    iny
+    inx
+    cpx #16                        ; TYPE, REG, SQWK, CAT are contiguous
+    bne @copy
+@done:
+    rts
+.endproc
+
+; Rebuild all 37 selected-aircraft characters from protocol v2 identity and
+; motion records.
+.proc build_selected_fields
+    ldx #0
+    lda #CHAR_SPACE
+@clear:
+    sta selected_fields,x
+    inx
+    cpx #37
+    bne @clear
+    lda active_slots
+    bne :+
+    jmp @done
+:
+    lda #CHAR_SPACE
+    sta selected_fields + SEL_TGT
+    lda selected_slot
+    clc
+    adc #CHAR_0 + 1
+    sta selected_fields + SEL_TGT + 1
+    jsr build_selected_identity
+
+    lda packet_count
+    sta records_left
+    ldy #0
+@record:
+    lda records_left
+    bne :+
+    jmp @done
+:
+    lda scene_payload,y
+    and #7
+    cmp selected_slot
+    beq @found
+    tya
+    clc
+    adc #RECORD_SIZE
+    tay
+    dec records_left
+    bne @record
+    rts
+@found:
+    sty rec_offset
+    lda scene_payload,y
+    sta record_flags
+    and #ALT_INVALID
+    bne @speed
+    lda scene_payload + 4,y
+    sta value_lo
+    lda scene_payload + 5,y
+    sta value_hi
+    jsr convert_u16_3digits
+    ldx #0
+    lda digit_hundreds
+    jsr store_alt_digit
+    lda digit_tens
+    jsr store_alt_digit
+    lda digit_ones
+    jsr store_alt_digit
+    lda #CHAR_0
+    sta selected_fields + SEL_ALT + 3
+    sta selected_fields + SEL_ALT + 4
+@speed:
+    ldy rec_offset
+    lda record_flags
+    and #SPEED_INVALID
+    bne @track
+    lda scene_payload + 6,y
+    sta value_lo
+    lda #0
+    sta value_hi
+    jsr convert_u16_3digits
+    ldx #0
+    lda digit_hundreds
+    jsr store_speed_digit
+    lda digit_tens
+    jsr store_speed_digit
+    lda digit_ones
+    jsr store_speed_digit
+@track:
+    lda record_flags
+    and #TRACK_INVALID
+    bne @vertical
+    ldy rec_offset
+    lda scene_payload + 3,y
+    sta track_value
+    lda #0
+    sta value_lo
+    sta value_hi
+    ldx #45
+@multiply_45:
+    clc
+    lda value_lo
+    adc track_value
+    sta value_lo
+    lda value_hi
+    adc #0
+    sta value_hi
+    dex
+    bne @multiply_45
+    clc                             ; round (track * 45) / 32
+    lda value_lo
+    adc #16
+    sta value_lo
+    lda value_hi
+    adc #0
+    sta value_hi
+    ldx #5
+@divide_32:
+    lsr value_hi
+    ror value_lo
+    dex
+    bne @divide_32
+    jsr convert_u16_3digits
+    ldx #0
+    lda digit_hundreds
+    jsr store_track_digit
+    lda digit_tens
+    jsr store_track_digit
+    lda digit_ones
+    jsr store_track_digit
+@vertical:
+    ldy rec_offset
+    lda scene_payload + 7,y
+    cmp #$80                        ; signed-rate unavailable sentinel
+    beq @distance
+    bcc @vertical_positive
+    ldx #CHAR_HYPHEN
+    eor #$FF
+    clc
+    adc #1
+    jmp @vertical_magnitude
+@vertical_positive:
+    ldx #CHAR_PLUS
+@vertical_magnitude:
+    stx selected_fields + SEL_VS
+    sta value_lo
+    lda #0
+    sta value_hi
+    jsr convert_u16_3digits
+    lda digit_tens
+    clc
+    adc #CHAR_0
+    sta selected_fields + SEL_VS + 1
+    lda digit_ones
+    clc
+    adc #CHAR_0
+    sta selected_fields + SEL_VS + 2
+    lda #CHAR_0
+    sta selected_fields + SEL_VS + 3
+    sta selected_fields + SEL_VS + 4
+@distance:
+    ldy rec_offset
+    lda scene_payload + 8,y
+    cmp #$FF                        ; distance unavailable sentinel
+    beq @done
+    sta value_lo
+    lda #0
+    sta value_hi
+    jsr convert_u16_3digits
+    lda digit_tens
+    clc
+    adc #CHAR_0
+    sta selected_fields + SEL_DIST
+    lda #CHAR_DOT
+    sta selected_fields + SEL_DIST + 1
+    lda digit_ones
+    clc
+    adc #CHAR_0
+    sta selected_fields + SEL_DIST + 2
+@done:
+    rts
+.endproc
+
+.proc store_alt_digit
+    clc
+    adc #CHAR_0
+    sta selected_fields + SEL_ALT,x
+    inx
+    rts
+.endproc
+
+.proc store_speed_digit
+    clc
+    adc #CHAR_0
+    sta selected_fields + SEL_SPD,x
+    inx
+    rts
+.endproc
+
+.proc store_track_digit
+    clc
+    adc #CHAR_0
+    sta selected_fields + SEL_TRK,x
+    inx
+    rts
+.endproc
+
+.proc build_status_fields
+    lda #CHAR_SPACE
+    sta status_fields + STATUS_COUNT
+    lda packet_count
+    clc
+    adc #CHAR_0
+    sta status_fields + STATUS_COUNT + 1
+    ; A scene was just taken from the nesp32: the link is LIVE.
+    jmp set_link_live
+.endproc
+
+; Remove every visible aircraft while preserving cached identity text for a
+; clean recovery when the next current scene arrives. Nothing calls this now
+; that WAITING retains its targets. Kept because it is the only correct
+; response if a reason to blank the scope comes back.
+.proc clear_target_state
+    lda #0
+    sta active_slots
+    sta displayed_count
+    sta packet_count
+    sta selected_slot
+    sta previous_selected_slot
+    sta oam_rotation
+    jsr build_oam_shadow
+    jsr build_selected_fields
+    lda #CHAR_SPACE
+    sta status_fields + STATUS_COUNT
+    lda #CHAR_0
+    sta status_fields + STATUS_COUNT + 1
+    rts
+.endproc
+
+; A READY reply from the nesp32 proves the link is working. Whether its
+; scene is fresh is the scene's flags' to say.
+.proc note_valid_packet
+    lda #0
+    sta link_age_lo
+    sta link_age_hi
+    sta link_timed_out
+    rts
+.endproc
+
+; Advance the no-valid-packet age by one video field. Carry is set exactly once
+; when the ten-second threshold is crossed and the state becomes WAITING.
+.proc age_link
+    lda link_timed_out
+    bne @unchanged
+    inc link_age_lo
+    bne :+
+    inc link_age_hi
+:
+    lda link_age_hi
+    cmp #>LINK_STALE_FRAMES
+    bcc @unchanged
+    bne @timeout
+    lda link_age_lo
+    cmp #<LINK_STALE_FRAMES
+    bcc @unchanged
+@timeout:
+    lda #1
+    sta link_timed_out
+    jsr set_link_waiting
+    sec
+    rts
+@unchanged:
+    clc
+    rts
+.endproc
+
+; The LINK field alone, for a caller that has just found vblank.
+.proc write_link_during_vblank
+    lda #<(status_fields + STATUS_LINK)
+    sta field_src
+    lda #>(status_fields + STATUS_LINK)
+    sta field_src + 1
+    lda #FONT_DIM_BASE
+    sta field_font
+    ldy #LINK_STATE_WIDTH
+    lda #>FLD_LINK
+    ldx #<FLD_LINK
+    jsr write_field
+    jsr restore_scroll
+    rts
+.endproc
+
+.proc set_link_waiting
+    lda #<link_waiting_chars
+    ldx #>link_waiting_chars
+    jmp copy_link_state
+.endproc
+
+; A scene from the nesp32 is on the scope and it is good. The dots after it
+; (link_stream) say that data is coming in.
+.proc set_link_live
+    lda #<link_live_chars
+    ldx #>link_live_chars
+    jsr copy_link_state
+    lda #1
+    sta link_live
+    rts
+.endproc
+
+.proc set_link_adsb_down
+    lda #<link_adsb_down_chars
+    ldx #>link_adsb_down_chars
+    jmp copy_link_state
+.endproc
+
+; A:X points to a fixed-width LINK state in ROM. Every state but LIVE stops
+; the dots.
+.proc copy_link_state
+    sta field_src
+    stx field_src + 1
+    ldy #0
+    sty link_live
+    sty link_stream
+@copy:
+    lda (field_src),y
+    sta status_fields + STATUS_LINK,y
+    iny
+    cpy #LINK_STATE_WIDTH
+    bne @copy
+    rts
+.endproc
+
+; Convert value_hi:value_lo to three decimal digits, clipping at 999.
+.proc convert_u16_3digits
+    lda value_hi
+    cmp #3
+    bcc @convert
+    bne @clip
+    lda value_lo
+    cmp #$E8                       ; $03E8 = 1000
+    bcs @clip
+@convert:
+    lda #0
+    sta digit_hundreds
+    sta digit_tens
+@hundreds:
+    lda value_hi
+    bne @subtract_100
+    lda value_lo
+    cmp #100
+    bcc @tens
+@subtract_100:
+    lda value_lo
+    sec
+    sbc #100
+    sta value_lo
+    lda value_hi
+    sbc #0
+    sta value_hi
+    inc digit_hundreds
+    jmp @hundreds
+@tens:
+    lda value_lo
+    cmp #10
+    bcc @ones
+    sec
+    sbc #10
+    sta value_lo
+    inc digit_tens
+    jmp @tens
+@ones:
+    lda value_lo
+    sta digit_ones
+    rts
+@clip:
+    lda #9
+    sta digit_hundreds
+    sta digit_tens
+    sta digit_ones
+    rts
+.endproc
+
+; Read a standard controller from port 1. The final bit layout is convenient
+; for edge handling: A,B,Select,Start,Up,Down,Left,Right become bits 7..0.
+.proc read_controller
+    lda #0                        ; OUT0 rests at mark, which holds the pad's
+    sta JOY1                      ; latch open: dropping it takes the buttons
+    sta controller_current
+    ldx #8
+@button:
+    lda JOY1
+    and #1
+    lsr a
+    rol controller_current
+    dex
+    bne @button
+    lda #OUT0_MARK
+    sta JOY1
+    rts
+.endproc
+
+.proc latch_controller
+    jsr read_controller
+    jsr nesp_key_next           ; a key typed that stands for buttons
+    ora controller_pending
+    sta controller_pending
+    lda controller_previous
+    eor #$FF
+    and controller_current
+    ora controller_pending
+    sta controller_pending
+    lda controller_current
+    sta controller_previous
+    rts
+.endproc
+
+; The picker, in three vblanks: the port's name, the range and the sprites
+; (none); the zip code, its cursor and the message line; the help for the
+; list or for the zip code.
+.proc render_editor
+    jsr port_name_pointer
+    lda place_ptr
+    sta field_src
+    lda place_ptr + 1
+    sta field_src + 1
+
+    jsr range_digits
+
+    ldx #ZIP_LEN - 1              ; the zip code's digits, or nothing
+@zip:
+    lda zip_code,x
+    sec
+    sbc #'0' - CHAR_0
+    ldy picker_port
+    cpy #PORT_COUNT
+    beq :+
+    lda #CHAR_SPACE
+:
+    sta picker_tiles,x
+    lda #CHAR_SPACE
+    sta startup_cursor,x
+    dex
+    bpl @zip
+    lda picker_mode
+    beq :+
+    ldx editor_index
+    lda #CHAR_HYPHEN
+    sta startup_cursor,x
+:
+
+    jsr begin_vram_update
+    lda #FONT_DIM_BASE            ; the startup palette's bright green
+    sta field_font
+    ldy #PORT_NAME_LEN
+    lda #>PICKER_NAME_ADDR
+    ldx #<PICKER_NAME_ADDR
+    jsr write_field
+    lda #<(picker_tiles + ZIP_LEN)
+    sta field_src
+    lda #>(picker_tiles + ZIP_LEN)
+    sta field_src + 1
+    ldy #2
+    lda #>PICKER_RANGE_ADDR
+    ldx #<PICKER_RANGE_ADDR
+    jsr write_field
+    lda #0
+    sta OAMADDR
+    lda #>oam_shadow
+    sta OAMDMA
+    jsr restore_scroll
+
+    jsr begin_vram_update
+    lda #<picker_tiles
+    sta field_src
+    lda #>picker_tiles
+    sta field_src + 1
+    lda #FONT_DIM_BASE            ; the digits bright while they are being set
+    ldx picker_mode
+    bne :+
+    lda #FONT_BASE
+:
+    sta field_font
+    ldy #ZIP_LEN
+    lda #>STARTUP_CODE_ADDR
+    ldx #<STARTUP_CODE_ADDR
+    jsr write_field
+    lda #<startup_cursor
+    sta field_src
+    lda #>startup_cursor
+    sta field_src + 1
+    lda #FONT_DIM_BASE
+    sta field_font
+    ldy #ZIP_LEN
+    lda #>STARTUP_CURSOR_ADDR
+    ldx #<STARTUP_CURSOR_ADDR
+    jsr write_field
+    lda #<startup_blank_16
+    sta field_src
+    lda #>startup_blank_16
+    sta field_src + 1
+    ldy #16
+    lda #>STARTUP_MESSAGE_ADDR
+    ldx #<STARTUP_MESSAGE_ADDR
+    jsr write_field
+    jsr restore_scroll
+
+    lda #<help_list               ; the help: the list's, or the zip code's
+    ldx #>help_list
+    ldy picker_mode
+    beq :+
+    lda #<help_zip
+    ldx #>help_zip
+:
+    sta field_src
+    stx field_src + 1
+    jsr begin_vram_update
+    lda #FONT_DIM_BASE
+    sta field_font
+    ldy #16
+    lda #>PICKER_HELP_ADDR
+    ldx #<PICKER_HELP_ADDR
+    jsr write_field
+    jsr help_next
+    ldy #16
+    lda #>(PICKER_HELP_ADDR + 32)
+    ldx #<(PICKER_HELP_ADDR + 32)
+    jsr write_field
+    jsr help_next
+    ldy #16
+    lda #>(PICKER_HELP_ADDR + 64)
+    ldx #<(PICKER_HELP_ADDR + 64)
+    jsr write_field
+    jmp restore_scroll
+.endproc
+
+; picker_tiles + ZIP_LEN: the range's two digits, with no leading zero.
+.proc range_digits
+    ldx range_index               ; the range's two digits
+    lda harbor_ranges,x
+    ldx #CHAR_0
+:
+    cmp #10
+    bcc :+
+    sbc #10                       ; carry is set
+    inx
+    bne :-
+:
+    clc
+    adc #CHAR_0
+    sta picker_tiles + ZIP_LEN + 1
+    cpx #CHAR_0
+    bne :+
+    ldx #CHAR_SPACE               ; no leading zero
+:
+    stx picker_tiles + ZIP_LEN
+    rts
+.endproc
+
+; The scope's corner, where nes-radar's says 09NM: the range chosen. With
+; rendering off, as initialize_video writes.
+.proc write_scope_range
+    jsr range_digits
+    lda #<(picker_tiles + ZIP_LEN)
+    sta field_src
+    lda #>(picker_tiles + ZIP_LEN)
+    sta field_src + 1
+    lda #FONT_DIM_BASE
+    sta field_font
+    ldy #2
+    lda #>SCOPE_RANGE_ADDR
+    ldx #<SCOPE_RANGE_ADDR
+    jmp write_field
+.endproc
+
+.proc help_next
+    lda field_src
+    clc
+    adc #16
+    sta field_src
+    bcc :+
+    inc field_src + 1
+:
+    rts
+.endproc
+
+; A=0 shows REQUESTING; A!=0 shows INVALID AIRPORT.
+.proc show_startup_message
+    sta temp
+    jsr begin_vram_update
+    lda temp
+    bne @invalid
+    lda #<startup_requesting_chars
+    ldx #>startup_requesting_chars
+    bne @source_ready
+@invalid:
+    lda #<startup_invalid_chars
+    ldx #>startup_invalid_chars
+@source_ready:
+    sta field_src
+    stx field_src + 1
+    lda #FONT_DIM_BASE
+    sta field_font
+    ldy #16
+    lda #>STARTUP_MESSAGE_ADDR
+    ldx #<STARTUP_MESSAGE_ADDR
+    jsr write_field
+    jsr restore_scroll
+    rts
+.endproc
+
+
+
+.proc initialize_startup_video
+    lda #0
+    sta PPUMASK
+    lda #CHR_BANK_RADAR
+    jsr select_chr_bank
+    jsr load_ldv_palette
+
+    bit PPUSTATUS
+    lda #$20
+    sta PPUADDR
+    lda #$00
+    sta PPUADDR
+    ldx #0
+    lda #CHAR_SPACE
+@clear_0:
+    sta PPUDATA
+    inx
+    bne @clear_0
+    ldx #0
+@clear_1:
+    sta PPUDATA
+    inx
+    bne @clear_1
+    ldx #0
+@clear_2:
+    sta PPUDATA
+    inx
+    bne @clear_2
+    ldx #0
+@clear_3:
+    sta PPUDATA
+    inx
+    bne @clear_3
+    jsr write_startup_static
+
+    ldx #0
+    lda #$FF
+@clear_oam:
+    sta oam_shadow,x
+    inx
+    bne @clear_oam
+    lda #0
+    sta OAMADDR
+    lda #>oam_shadow
+    sta OAMDMA
+    lda #0
+    sta PPUSCROLL
+    sta PPUSCROLL
+    lda #PPUCTRL_SPR_8X16
+    sta PPUCTRL
+    lda #SHOW_STARTUP
+    sta PPUMASK
+    rts
+.endproc
+
+.proc initialize_video
+    lda #0
+    sta PPUMASK
+    sta controller_pending
+    sta controller_previous
+    sta displayed_count
+    sta link_age_lo
+    sta link_age_hi
+    sta link_timed_out
+    sta navigation_requested
+    lda #1
+    jsr load_ldv_palette
+
+    bit PPUSTATUS
+    lda #$20
+    sta PPUADDR
+    lda #$00
+    sta PPUADDR
+    ldx #0
+@nametable_0:
+    lda ldv_bg_nam,x
+    sta PPUDATA
+    inx
+    bne @nametable_0
+    ldx #0
+@nametable_1:
+    lda ldv_bg_nam + 256,x
+    sta PPUDATA
+    inx
+    bne @nametable_1
+    ldx #0
+@nametable_2:
+    lda ldv_bg_nam + 512,x
+    sta PPUDATA
+    inx
+    bne @nametable_2
+    ldx #0
+@nametable_3:
+    lda ldv_bg_nam + 768,x
+    sta PPUDATA
+    inx
+    cpx #192
+    bne @nametable_3
+
+    bit PPUSTATUS
+    lda #$23
+    sta PPUADDR
+    lda #$C0
+    sta PPUADDR
+    ldx #0
+@attributes:
+    lda ldv_bg_att,x
+    sta PPUDATA
+    inx
+    cpx #64
+    bne @attributes
+
+    ; Rendering is still off, so the short dynamic status fields go now.
+    jsr write_status_frame
+    jsr write_scope_range
+
+    ldx #0
+    lda #$FF
+@clear_oam:
+    sta oam_shadow,x
+    inx
+    bne @clear_oam
+    lda #0
+    sta OAMADDR
+    lda #>oam_shadow
+    sta OAMDMA
+
+    lda #0
+    sta PPUSCROLL
+    sta PPUSCROLL
+    lda #PPUCTRL_SPR_8X16
+    sta PPUCTRL
+    lda #SHOW_SCOPE
+    sta PPUMASK
+    rts
+.endproc
+
+.proc load_ldv_palette
+    bit PPUSTATUS
+    lda #$3F
+    sta PPUADDR
+    lda #$00
+    sta PPUADDR
+    ldx #0
+@palette:
+    lda ldv_palette,x
+    sta PPUDATA
+    inx
+    cpx #32
+    bne @palette
+    rts
+.endproc
+
+.proc write_startup_static
+    lda #0                        ; the words are tiles already
+    sta field_font
+    lda #<picker_title
+    ldx #>picker_title
+    ldy #10
+    jsr static_at
+    .addr PICKER_TITLE_ADDR
+    lda #<picker_select
+    ldx #>picker_select
+    ldy #11
+    jsr static_at
+    .addr PICKER_SELECT_ADDR
+    lda #<picker_range_label
+    ldx #>picker_range_label
+    ldy #5
+    jsr static_at
+    .addr PICKER_RANGE_LABEL
+    lda #<picker_range_unit
+    ldx #>picker_range_unit
+    ldy #2
+    jsr static_at
+    .addr PICKER_RANGE_UNIT
+.ifdef CART
+    lda #<picker_menu
+    ldx #>picker_menu
+    ldy #11
+    jsr static_at
+    .addr PICKER_MENU_ADDR
+.endif
+    lda #<picker_source
+    ldx #>picker_source
+    ldy #21
+    jsr static_at
+    .addr PICKER_SOURCE_ADDR
+    lda #<picker_credits
+    ldx #>picker_credits
+    ldy #24
+    jsr static_at
+    .addr PICKER_CREDIT_ADDR
+    lda #<(picker_credits + 24)
+    ldx #>(picker_credits + 24)
+    ldy #24
+    jsr static_at
+    .addr PICKER_CREDIT_ADDR + 32
+    lda #<(picker_credits + 48)
+    ldx #>(picker_credits + 48)
+    ldy #24
+    jsr static_at
+    .addr PICKER_CREDIT_ADDR + 64
+    lda #<(picker_credits + 72)
+    ldx #>(picker_credits + 72)
+    ldy #24
+    jsr static_at
+    .addr PICKER_CREDIT_ADDR + 96
+    rts
+.endproc
+
+; write_field with the source in A:X, the width in Y, and the nametable
+; address in the two bytes after the jsr, which it returns past.
+.proc static_at
+    sta field_src
+    stx field_src + 1
+    sty field_width
+    tsx
+    lda $0101,x                   ; the jsr's return address, less one
+    sta place_ptr
+    lda $0102,x
+    sta place_ptr + 1
+    lda $0101,x                   ; and it returns past the address
+    clc
+    adc #2
+    sta $0101,x
+    bcc :+
+    inc $0102,x
+:
+    ldy #1
+    lda (place_ptr),y             ; the address's low byte
+    tax
+    iny
+    lda (place_ptr),y
+    ldy field_width
+    jmp write_field
+.endproc
+
+; The LDV contract's four rendered vblanks. Frame A also performs OAM DMA;
+; rendering remains enabled throughout every dynamic update.
+.proc commit_display
+    jsr begin_vram_update
+    lda #0
+    sta OAMADDR
+    lda #>oam_shadow
+    sta OAMDMA
+    jsr write_selected_frame
+    jsr restore_scroll
+
+    jsr begin_vram_update
+    ldx #0
+    jsr write_table_half
+    jsr restore_scroll
+
+    jsr begin_vram_update
+    ldx #4
+    jsr write_table_half
+    jsr restore_scroll
+
+    jsr begin_vram_update
+    jsr write_status_frame
+    jsr restore_scroll
+    rts
+.endproc
+
+; A selection-only change fits in one rendered vblank: OAM DMA, the 37-tile
+; selected panel, and two one-tile table-slot updates.
+.proc commit_selection
+    jsr begin_vram_update
+    lda #0
+    sta OAMADDR
+    lda #>oam_shadow
+    sta OAMDMA
+    jmp commit_selection_fields
+.endproc
+
+; The nametable half of commit_selection. Counted, because this runs on a
+; vblank found by polling rather than by NMI and the margin is what keeps it
+; off the visible frame:
+;
+;   OAM DMA                 about  520
+;   write_selected_frame    about 1336 cycles, 35 tiles across nine fields
+;   write_selection_slots   about   66
+;   restore_scroll          about   36
+;                          -----
+;                           about 1958, against 2273 cycles of NTSC vblank
+.proc commit_selection_fields
+    jsr write_selected_frame
+    jsr write_selection_slots
+    jsr restore_scroll
+    rts
+.endproc
+
+; The targets' turn in front changes only OAM priority: one DMA.
+.proc commit_oam
+    jsr begin_vram_update
+    lda #0
+    sta OAMADDR
+    lda #>oam_shadow
+    sta OAMDMA
+    jsr restore_scroll
+    rts
+.endproc
+
+.proc write_selection_slots
+    ldx previous_selected_slot
+    bit PPUSTATUS
+    lda table_slot_addr_hi,x
+    sta PPUADDR
+    lda table_slot_addr_lo,x
+    sta PPUADDR
+    txa
+    clc
+    adc #CHAR_0 + 1 + FONT_BASE
+    sta PPUDATA
+
+    ldx selected_slot
+    bit PPUSTATUS
+    lda table_slot_addr_hi,x
+    sta PPUADDR
+    lda table_slot_addr_lo,x
+    sta PPUADDR
+    txa
+    clc
+    adc #FONT_INV_BASE
+    sta PPUDATA
+    rts
+.endproc
+
+.proc write_selected_frame
+    ; FLD_TGT is the one mixed-font field: a dim space plus inverse slot digit.
+    bit PPUSTATUS
+    lda #>FLD_TGT
+    sta PPUADDR
+    lda #<FLD_TGT
+    sta PPUADDR
+    lda #CHAR_SPACE + FONT_DIM_BASE
+    sta PPUDATA
+    lda active_slots
+    beq @blank_target
+    lda selected_slot
+    clc
+    adc #FONT_INV_BASE
+    bne @target_ready
+@blank_target:
+    lda #CHAR_SPACE + FONT_DIM_BASE
+@target_ready:
+    sta PPUDATA
+
+    lda #FONT_DIM_BASE
+    sta field_font
+    lda #<(selected_fields + SEL_TYPE)
+    sta field_src
+    lda #>(selected_fields + SEL_TYPE)
+    sta field_src + 1
+    ldy #4
+    lda #>FLD_TYPE
+    ldx #<FLD_TYPE
+    jsr write_field
+    lda #<(selected_fields + SEL_REG)
+    sta field_src
+    lda #>(selected_fields + SEL_REG)
+    sta field_src + 1
+    ldy #6
+    lda #>FLD_REG
+    ldx #<FLD_REG
+    jsr write_field
+    lda #<(selected_fields + SEL_SQWK)
+    sta field_src
+    lda #>(selected_fields + SEL_SQWK)
+    sta field_src + 1
+    ldy #4
+    lda #>FLD_SQWK
+    ldx #<FLD_SQWK
+    jsr write_field
+    lda #<(selected_fields + SEL_CAT)
+    sta field_src
+    lda #>(selected_fields + SEL_CAT)
+    sta field_src + 1
+    ldy #2
+    lda #>FLD_CAT
+    ldx #<FLD_CAT
+    jsr write_field
+    lda #<(selected_fields + SEL_ALT)
+    sta field_src
+    lda #>(selected_fields + SEL_ALT)
+    sta field_src + 1
+    ldy #5
+    lda #>FLD_ALT
+    ldx #<FLD_ALT
+    jsr write_field
+    lda #<(selected_fields + SEL_SPD)
+    sta field_src
+    lda #>(selected_fields + SEL_SPD)
+    sta field_src + 1
+    ldy #3
+    lda #>FLD_SPD
+    ldx #<FLD_SPD
+    jsr write_field
+    lda #<(selected_fields + SEL_TRK)
+    sta field_src
+    lda #>(selected_fields + SEL_TRK)
+    sta field_src + 1
+    ldy #3
+    lda #>FLD_TRK
+    ldx #<FLD_TRK
+    jsr write_field
+    lda #<(selected_fields + SEL_VS)
+    sta field_src
+    lda #>(selected_fields + SEL_VS)
+    sta field_src + 1
+    ldy #5
+    lda #>FLD_VS
+    ldx #<FLD_VS
+    jsr write_field
+    lda #<(selected_fields + SEL_DIST)
+    sta field_src
+    lda #>(selected_fields + SEL_DIST)
+    sta field_src + 1
+    ldy #3
+    lda #>FLD_DIST
+    ldx #<FLD_DIST
+    jsr write_field
+    rts
+.endproc
+
+; Four slots: slot digit, seven callsign characters, four type characters.
+.proc write_table_half
+    stx table_slot_index
+    lda #4
+    sta table_rows_left
+@slot:
+    ldx table_slot_index
+    bit PPUSTATUS
+    lda table_slot_addr_hi,x
+    sta PPUADDR
+    lda table_slot_addr_lo,x
+    sta PPUADDR
+    cpx selected_slot
+    bne @normal_slot
+    lda active_slots
+    and slot_masks,x
+    beq @normal_slot
+    txa
+    clc
+    adc #FONT_INV_BASE
+    bne @write_slot
+@normal_slot:
+    txa
+    clc
+    adc #CHAR_0 + 1 + FONT_BASE
+@write_slot:
+    sta PPUDATA
+
+    lda table_slot_index
+    asl a
+    asl a
+    asl a                          ; slot * 8
+    sta temp
+    asl a                          ; slot * 16
+    clc
+    adc temp                       ; slot * 24
+    clc
+    adc #<identity_tiles
+    sta field_src
+    lda #>identity_tiles
+    adc #0
+    sta field_src + 1
+    ldx table_slot_index
+    lda slot_masks,x
+    and active_slots
+    bne @identity_source_ready
+    lda #<blank_identity_row
+    sta field_src
+    lda #>blank_identity_row
+    sta field_src + 1
+@identity_source_ready:
+    lda table_slot_index
+    and #1
+    beq @bright_row
+    lda #FONT_BASE
+    bne @font_ready
+@bright_row:
+    lda #FONT_DIM_BASE
+@font_ready:
+    sta field_font
+    ldx table_slot_index
+    ldy #7
+    lda table_call_addr_hi,x
+    pha
+    lda table_call_addr_lo,x
+    tax
+    pla
+    jsr write_field
+
+    clc
+    lda field_src
+    adc #8
+    sta field_src
+    lda field_src + 1
+    adc #0
+    sta field_src + 1
+    ldx table_slot_index
+    ldy #4
+    lda table_type_addr_hi,x
+    pha
+    lda table_type_addr_lo,x
+    tax
+    pla
+    jsr write_field
+
+    inc table_slot_index
+    dec table_rows_left
+    beq :+
+    jmp @slot
+:
+    rts
+.endproc
+
+.proc write_status_frame
+    lda #FONT_DIM_BASE
+    sta field_font
+    lda #<(status_fields + STATUS_COUNT)
+    sta field_src
+    lda #>(status_fields + STATUS_COUNT)
+    sta field_src + 1
+    ldy #2
+    lda #>FLD_COUNT
+    ldx #<FLD_COUNT
+    jsr write_field
+    lda #<(status_fields + STATUS_APT)
+    sta field_src
+    lda #>(status_fields + STATUS_APT)
+    sta field_src + 1
+    ldy #4
+    lda #>FLD_APT
+    ldx #<FLD_APT
+    jsr write_field
+    lda #<(status_fields + STATUS_LINK)
+    sta field_src
+    lda #>(status_fields + STATUS_LINK)
+    sta field_src + 1
+    ldy #LINK_STATE_WIDTH
+    lda #>FLD_LINK
+    ldx #<FLD_LINK
+    jsr write_field
+    rts
+.endproc
+
+; A:X = PPU address high:low, field_src = source character indices,
+; Y = fixed width, field_font = font base. Every call writes exactly Y tiles.
+.proc write_field
+    sta field_addr_hi
+    stx field_addr_lo
+    sty field_width
+    bit PPUSTATUS
+    lda field_addr_hi
+    sta PPUADDR
+    lda field_addr_lo
+    sta PPUADDR
+    ldy #0
+@tile:
+    lda (field_src),y
+    clc
+    adc field_font
+    sta PPUDATA
+    iny
+    cpy field_width
+    bne @tile
+    rts
+.endproc
+
+; A link state, A:X as copy_link_state's, on the screen at once.
+.proc show_link
+    jsr copy_link_state
+    jsr begin_vram_update
+    jsr write_status_frame
+    jmp restore_scroll
+.endproc
+
+; One frame of the dots after LIVE: one, two, three, a step every
+; LINK_DOT_FRAMES, for as long as link_stream has steps left. When it runs
+; out, LIVE stands alone. Carry set if the field has changed.
+.proc tick_link_dots
+    lda link_stream
+    beq @done
+    dec link_dot_timer
+    bne @done
+    lda #LINK_DOT_FRAMES
+    sta link_dot_timer
+    dec link_stream
+    beq @plain
+    inc link_dots
+    lda link_dots
+    cmp #4
+    bcc :+
+    lda #1
+    sta link_dots
+:
+    ldx #0
+@dot:
+    ldy #CHAR_SPACE
+    cpx link_dots
+    bcs :+
+    ldy #CHAR_DOT
+:
+    tya
+    sta status_fields + STATUS_LINK + 4,x
+    inx
+    cpx #3
+    bne @dot
+    sec
+    rts
+@plain:
+    lda #CHAR_SPACE
+    sta status_fields + STATUS_LINK + 4
+    sta status_fields + STATUS_LINK + 5
+    sta status_fields + STATUS_LINK + 6
+    sec
+    rts
+@done:
+    clc
+    rts
+.endproc
+
+; Data is coming from the nesp32, a scene or its names: the dots, if LIVE,
+; from one again.
+.proc note_link_stream
+    lda link_live
+    beq :+
+    lda #0
+    sta link_dots
+    lda #LINK_STREAM_STEPS
+    sta link_stream
+    lda #1                      ; and a step at once
+    sta link_dot_timer
+:
+    rts
+.endproc
+
+; Arm NMI only long enough to acquire an exact vblank boundary. Rendering is
+; deliberately left enabled: forced blank skips the pre-render scroll reload
+; and was the diagnosed cause of the earlier one-tile vertical displacement.
+.proc begin_vram_update
+    ; The link runs with NMI disabled. Between exchanges, arm NMI only long
+    ; enough to get an exact vblank boundary.
+    lda #0
+    sta vblank_ready
+    bit PPUSTATUS
+    lda #PPUCTRL_UPDATE_NMI
+    sta PPUCTRL
+@wait:
+    lda vblank_ready
+    beq @wait
+    lda #PPUCTRL_SPR_8X16
+    sta PPUCTRL
+    bit PPUSTATUS
+    rts
+.endproc
+
+.proc restore_scroll
+    ; PPUADDR and PPUSCROLL share the write toggle. Reset it explicitly before
+    ; restoring scroll so a marginal/late address write cannot pair with the
+    ; first scroll byte and leave the nametable displaced.
+    bit PPUSTATUS
+    lda #0
+    sta PPUSCROLL
+    sta PPUSCROLL
+    lda #PPUCTRL_SPR_8X16
+    sta PPUCTRL
+    rts
+.endproc
+
+.proc wait_vblank
+@wait_end:
+    bit PPUSTATUS
+    bmi @wait_end
+@wait_start:
+    bit PPUSTATUS
+    bpl @wait_start
+    rts
+.endproc
+
+.ifdef CART
+; Select, in the editor or on the scope, on nesp32's cartridge: back to its
+; menu, the way
+; reset goes there. The cartridge points this program's reset vector at
+; the menu's stub, which resets the mapper and starts the menu. With the
+; picture and the NMI off first, as a reset would leave them.
+.proc to_cart_menu
+    sei
+    lda #0
+    sta PPUCTRL
+    sta PPUMASK
+    jmp ($FFFC)
+.endproc
+.endif
+
+.proc nmi
+    pha
+    lda #1
+    sta vblank_ready
+    pla
+    rti
+.endproc
+
+.proc irq
+    rti
+.endproc
+
+; CN-ROM's discrete latch can have PRG bus conflicts.  BANKDATA begins at
+; $8000 with bytes 0,1,2,3, so A and the ROM byte always agree on the write.
+.proc select_chr_bank
+.ifdef CART
+    jmp radar_cart_chr            ; the cartridge's mapper is asked another way
+.else
+    tax
+    sta chr_bank_values,x
+    rts
+.endif
+.endproc
+
+.proc initialize_splash_video
+    lda #0
+    sta PPUMASK
+    sta PPUCTRL
+    lda #CHR_BANK_SPLASH
+    jsr select_chr_bank
+
+    bit PPUSTATUS
+    lda #$3F
+    sta PPUADDR
+    lda #$00
+    sta PPUADDR
+    ldx #0
+@palette:
+    lda splash_bg_palette,x
+    sta PPUDATA
+    inx
+    cpx #16
+    bne @palette
+
+    bit PPUSTATUS
+    lda #$20
+    sta PPUADDR
+    lda #$00
+    sta PPUADDR
+    ldx #0
+@nametable_0:
+    lda splash_bg_nam,x
+    sta PPUDATA
+    inx
+    bne @nametable_0
+    ldx #0
+@nametable_1:
+    lda splash_bg_nam + 256,x
+    sta PPUDATA
+    inx
+    bne @nametable_1
+    ldx #0
+@nametable_2:
+    lda splash_bg_nam + 512,x
+    sta PPUDATA
+    inx
+    bne @nametable_2
+    ldx #0
+@nametable_3:
+    lda splash_bg_nam + 768,x
+    sta PPUDATA
+    inx
+    bne @nametable_3
+
+    jsr draw_version_stamp
+
+    ldx #0
+    lda #$FF
+@clear_oam:
+    sta oam_shadow,x
+    inx
+    bne @clear_oam
+    lda #0
+    sta OAMADDR
+    lda #>oam_shadow
+    sta OAMDMA
+    lda #0
+    sta PPUSCROLL
+    sta PPUSCROLL
+    sta PPUCTRL
+    lda #SHOW_BACKGROUND
+    sta PPUMASK
+    rts
+.endproc
+
+; Writes the product name and build version into the blank strip below the logo,
+; so a ROM that turns up in the wild says what it is and which build it is.  The
+; splash nametable itself is left alone; the text is painted over it after the
+; upload.  Rendering is still off at this point, so this does not have to fit in
+; vblank.
+.proc draw_version_stamp
+    bit PPUSTATUS
+    lda #>SPLASH_TITLE_ADDR
+    sta PPUADDR
+    lda #<SPLASH_TITLE_ADDR
+    sta PPUADDR
+    ldx #0
+@title:
+    lda splash_title,x
+    sta PPUDATA
+    inx
+    cpx #SPLASH_TITLE_LENGTH
+    bne @title
+
+    bit PPUSTATUS
+    lda #>VERSION_STAMP_ADDR
+    sta PPUADDR
+    lda #<VERSION_STAMP_ADDR
+    sta PPUADDR
+    ldx #0
+@glyph:
+    lda version_stamp,x
+    sta PPUDATA
+    inx
+    cpx #VERSION_STAMP_LENGTH
+    bne @glyph
+    rts
+.endproc
+
+; The splash for SPLASH_FRAMES, or until Start. On nesp32's cartridge it is
+; not skipped: the Start that chose NES Radar from the menu is still held.
+.proc wait_splash
+    lda #SPLASH_FRAMES
+    sta splash_frames
+@frame:
+    jsr wait_vblank
+.ifdef CART
+    dec splash_frames
+    bne @frame
+    rts
+.else
+    jsr read_controller
+    lda controller_current
+    and #BUTTON_START
+    bne @release
+    dec splash_frames
+    bne @frame
+    rts
+@release:
+    jsr wait_vblank
+    jsr read_controller
+    lda controller_current
+    and #BUTTON_START
+    bne @release
+    rts
+.endif
+.endproc
+
+.include "harbor_data.inc"
+.include "radar_link.inc"
+
+.segment "BANKDATA"
+chr_bank_values:
+    .byte $00, $01, $02, $03
+
+.segment "SPLASHDATA"
+splash_bg_palette:
+    .incbin "assets/splash/splash_bg.palette.bin"
+splash_bg_nam:
+    .incbin "assets/splash/splash_bg.nam"
+
+; "NES HARBOR"
+splash_title:
+    .byte VER_N, VER_E, VER_S, VER_SPACE, VER_H, VER_A, VER_R, VER_B, VER_O, VER_R
+SPLASH_TITLE_LENGTH = * - splash_title
+
+; "V0.1.0" -- NES Harbor's release version. Bump this and README.md together. The
+; splash stamp is the only way to tell what is on a cartridge or in a .nes
+; file once it is out of context.
+version_stamp:
+    .byte VER_V, VER_0 + 0, VER_DOT, VER_0 + 1, VER_DOT, VER_0 + 0
+VERSION_STAMP_LENGTH = * - version_stamp
+
+.segment "RODATA"
+slot_masks:
+    .byte $01, $02, $04, $08, $10, $20, $40, $80
+
+link_waiting_chars:
+    .byte CHAR_A + ('W' - 'A'), CHAR_A + ('A' - 'A'), CHAR_A + ('I' - 'A'), CHAR_A + ('T' - 'A'), CHAR_A + ('I' - 'A'), CHAR_A + ('N' - 'A'), CHAR_A + ('G' - 'A'), CHAR_SPACE, CHAR_SPACE
+link_live_chars:
+    .byte CHAR_A + ('L' - 'A'), CHAR_A + ('I' - 'A'), CHAR_A + ('V' - 'A'), CHAR_A + ('E' - 'A'), CHAR_SPACE, CHAR_SPACE, CHAR_SPACE, CHAR_SPACE, CHAR_SPACE
+link_no_answer_chars:
+    .byte CHAR_A + ('N' - 'A'), CHAR_A + ('O' - 'A'), CHAR_SPACE, CHAR_A + ('A' - 'A'), CHAR_A + ('N' - 'A'), CHAR_A + ('S' - 'A'), CHAR_A + ('W' - 'A'), CHAR_A + ('E' - 'A'), CHAR_A + ('R' - 'A')
+link_bad_data_chars:
+    .byte CHAR_A + ('B' - 'A'), CHAR_A + ('A' - 'A'), CHAR_A + ('D' - 'A'), CHAR_SPACE, CHAR_A + ('D' - 'A'), CHAR_A + ('A' - 'A'), CHAR_A + ('T' - 'A'), CHAR_A + ('A' - 'A'), CHAR_SPACE
+link_adsb_down_chars:
+    tiles 0, " AIS DOWN"
+
+blank_identity_row:
+    .repeat 12
+        .byte CHAR_SPACE
+    .endrepeat
+
+startup_requesting_chars:
+    .byte CHAR_SPACE,CHAR_SPACE,CHAR_SPACE
+    .byte CHAR_A+('R'-'A'),CHAR_A+('E'-'A'),CHAR_A+('Q'-'A'),CHAR_A+('U'-'A'),CHAR_A+('E'-'A')
+    .byte CHAR_A+('S'-'A'),CHAR_A+('T'-'A'),CHAR_A+('I'-'A'),CHAR_A+('N'-'A'),CHAR_A+('G'-'A')
+    .byte CHAR_SPACE,CHAR_SPACE,CHAR_SPACE
+startup_invalid_chars:
+    tiles 0, "PLACE NOT FOUND "
+startup_blank_16:
+    .res 16, CHAR_SPACE
+
+table_slot_addr_hi:
+    .byte >TBL1_SLOT,>TBL2_SLOT,>TBL3_SLOT,>TBL4_SLOT,>TBL5_SLOT,>TBL6_SLOT,>TBL7_SLOT,>TBL8_SLOT
+table_slot_addr_lo:
+    .byte <TBL1_SLOT,<TBL2_SLOT,<TBL3_SLOT,<TBL4_SLOT,<TBL5_SLOT,<TBL6_SLOT,<TBL7_SLOT,<TBL8_SLOT
+table_call_addr_hi:
+    .byte >TBL1_CALL,>TBL2_CALL,>TBL3_CALL,>TBL4_CALL,>TBL5_CALL,>TBL6_CALL,>TBL7_CALL,>TBL8_CALL
+table_call_addr_lo:
+    .byte <TBL1_CALL,<TBL2_CALL,<TBL3_CALL,<TBL4_CALL,<TBL5_CALL,<TBL6_CALL,<TBL7_CALL,<TBL8_CALL
+table_type_addr_hi:
+    .byte >TBL1_TYPE,>TBL2_TYPE,>TBL3_TYPE,>TBL4_TYPE,>TBL5_TYPE,>TBL6_TYPE,>TBL7_TYPE,>TBL8_TYPE
+table_type_addr_lo:
+    .byte <TBL1_TYPE,<TBL2_TYPE,<TBL3_TYPE,<TBL4_TYPE,<TBL5_TYPE,<TBL6_TYPE,<TBL7_TYPE,<TBL8_TYPE
+
+.include "assets_metasprite_tables.inc"
+
+ldv_bg_nam:
+    .incbin "assets/ldv/ldv_bg.nam"
+ldv_bg_att:
+    .incbin "assets/ldv/ldv_bg.att"
+
+.segment "VECTORS"
+    .addr nmi, reset, irq
+
+.segment "CHR0"
+    ; splash_bg.chr leaves tiles $E6-$FF blank; the stamp glyphs go there
+    ; instead, lifted from the LDV font so the stamp matches the text the rest of
+    ; the ROM draws.  $E6-$EF are digits 0-9, $F0 '.', $F1 'V', $F2-$F7 N E S R A D.
+    .incbin "assets/splash/splash_bg.chr", 0, VER_GLYPH_BASE * 16
+    .incbin "assets/ldv/ldv_bg.chr", CHAR_0 * 16, 10 * 16
+    .incbin "assets/ldv/ldv_bg.chr", CHAR_DOT * 16, 16
+    .incbin "assets/ldv/ldv_bg.chr", (CHAR_A + 'V' - 'A') * 16, 16
+    .incbin "assets/ldv/ldv_bg.chr", (CHAR_A + 'N' - 'A') * 16, 16
+    .incbin "assets/ldv/ldv_bg.chr", (CHAR_A + 'E' - 'A') * 16, 16
+    .incbin "assets/ldv/ldv_bg.chr", (CHAR_A + 'S' - 'A') * 16, 16
+    .incbin "assets/ldv/ldv_bg.chr", (CHAR_A + 'R' - 'A') * 16, 16
+    .incbin "assets/ldv/ldv_bg.chr", (CHAR_A + 'A' - 'A') * 16, 16
+    .incbin "assets/ldv/ldv_bg.chr", (CHAR_A + 'D' - 'A') * 16, 16
+    .incbin "assets/ldv/ldv_bg.chr", (CHAR_A + 'H' - 'A') * 16, 16
+    .incbin "assets/ldv/ldv_bg.chr", (CHAR_A + 'B' - 'A') * 16, 16
+    .incbin "assets/ldv/ldv_bg.chr", (CHAR_A + 'O' - 'A') * 16, 16
+    .res $1000 - (VER_GLYPH_BASE + VER_GLYPH_COUNT) * 16, $00
+    .res $1000, $00
+
+.segment "CHR1"
+    .incbin "assets/ldv/ldv_bg.chr"
+    .incbin "build/radar_sprites_16.chr"
+
+.ifndef CART                      ; the cartridge has the scope's tiles once
+.segment "CHR2"
+    .incbin "assets/ldv/ldv_bg.chr"
+    .incbin "build/radar_sprites_16.chr"
+
+.segment "CHR3"
+    .incbin "assets/ldv/ldv_bg.chr"
+    .incbin "build/radar_sprites_16.chr"
+.endif
