@@ -263,12 +263,18 @@ splash_frames:   .res 1
     lda #1
     jsr initialize_display_buffers
     jsr initialize_splash_video
+    lda #1                        ; the music on, and a fanfare for the title
+    sta music_on
+    lda #TUNE_FANFARE
+    jsr music_play
     jsr wait_splash
     jsr radar_recall              ; the picker begins at the place the nesp32 kept
 
 radar_editor:                     ; nes/radar_link.inc comes back here
 @show_editor:
     jsr initialize_startup_video
+    lda #TUNE_SAILOR
+    jsr music_play
     lda #0
     sta editor_index
     sta picker_mode
@@ -329,6 +335,12 @@ radar_editor:                     ; nes/radar_link.inc comes back here
     sta editor_index
     jmp @editor_changed
 @list_moves:
+    lda controller_pressed
+    and #BUTTON_B                 ; B: the music on or off
+    beq :+
+    jsr music_toggle
+    jmp @editor_loop
+:
     lda controller_pressed
     and #BUTTON_UP
     bne @port_up
@@ -899,7 +911,54 @@ radar_editor:                     ; nes/radar_link.inc comes back here
     sta navigation_requested
     rts
 :
+    lda controller_current      ; A held: the pad moves the place
+    and #BUTTON_A
+    beq @not_pan
+    lda controller_pressed
+    and #PAD_DIRECTIONS
+    beq @not_pan
+    jsr harbor_pan
+    jmp @ranged
+@not_pan:
+    lda controller_pressed      ; LEFT and RIGHT: the range, at once; UP and
+    and #BUTTON_LEFT            ; DOWN alone choose the ship
+    beq @right
+    lda range_index
+    beq @ranged
+    dec range_index
+    jsr scope_rerange
+    jmp @ranged
+@right:
+    lda controller_pressed
+    and #BUTTON_RIGHT
+    beq @ranged
+    lda range_index
+    cmp #RANGE_COUNT - 1
+    bcs @ranged
+    inc range_index
+    jsr scope_rerange
+@ranged:
+    lda #<~(BUTTON_LEFT | BUTTON_RIGHT)
+    ldx controller_current      ; UP and DOWN choose the ship, unless A is held
+    bpl :+                      ; (BUTTON_A is bit 7)
+    lda #<~PAD_DIRECTIONS
+:
+    and controller_pressed
+    sta controller_pressed
     jmp move_selection
+.endproc
+
+; A new range on the scope: its corner now, and the place again with it,
+; which the nesp32 takes as the same place drawn again to the new range
+; (a new id, no fetch).
+.proc scope_rerange
+    inc radar_id
+    lda #0
+    sta radar_chosen            ; radar_poll says the place again
+    jsr begin_vram_update
+    jsr write_scope_range
+    jsr restore_scroll
+    jmp map_repaint             ; and a map to the new range
 .endproc
 
 ; The slot walk on its own, without the B and Select handling above.
@@ -1665,6 +1724,24 @@ radar_editor:                     ; nes/radar_link.inc comes back here
     sta navigation_requested
     lda #1
     jsr load_ldv_palette
+    bit PPUSTATUS                 ; the scope's middle is the map: BG0 as BG1,
+    lda #$3F                      ; water, land and foam
+    sta PPUADDR
+    lda #$01
+    sta PPUADDR
+    ldx #1
+:
+    lda ldv_palette + 4,x
+    sta PPUDATA
+    inx
+    cpx #4
+    bne :-
+    lda #$3F                      ; and the ships white, to be seen on land
+    sta PPUADDR
+    lda #$11
+    sta PPUADDR
+    lda #$30
+    sta PPUDATA
 
     bit PPUSTATUS
     lda #$20
@@ -1834,6 +1911,36 @@ radar_editor:                     ; nes/radar_link.inc comes back here
     lda (place_ptr),y
     ldy field_width
     jmp write_field
+.endproc
+
+; The title's sea, every eight frames: its wave colours trade places
+; (palette 1's second and third), just after a vblank has begun.
+.proc shimmer_splash_sea
+    lda splash_frames
+    and #7
+    bne @done
+    ldx #$11
+    ldy #$21
+    lda splash_frames
+    and #8
+    beq :+
+    ldx #$21
+    ldy #$11
+:
+    bit PPUSTATUS
+    lda #$3F
+    sta PPUADDR
+    lda #$06
+    sta PPUADDR
+    stx PPUDATA
+    sty PPUDATA
+    lda #0
+    sta PPUADDR
+    sta PPUADDR
+    sta PPUSCROLL
+    sta PPUSCROLL
+@done:
+    rts
 .endproc
 
 ; The LDV contract's four rendered vblanks. Frame A also performs OAM DMA;
@@ -2268,7 +2375,7 @@ radar_editor:                     ; nes/radar_link.inc comes back here
     sta PPUSCROLL
     lda #PPUCTRL_SPR_8X16
     sta PPUCTRL
-    rts
+    jmp music_tick              ; a vblank's writes are done: a frame of music
 .endproc
 
 .proc wait_vblank
@@ -2278,7 +2385,7 @@ radar_editor:                     ; nes/radar_link.inc comes back here
 @wait_start:
     bit PPUSTATUS
     bpl @wait_start
-    rts
+    jmp music_tick
 .endproc
 
 .ifdef CART
@@ -2432,6 +2539,7 @@ radar_editor:                     ; nes/radar_link.inc comes back here
     sta splash_frames
 @frame:
     jsr wait_vblank
+    jsr shimmer_splash_sea
 .ifdef CART
     dec splash_frames
     bne @frame
@@ -2456,6 +2564,8 @@ radar_editor:                     ; nes/radar_link.inc comes back here
 
 .include "harbor_data.inc"
 .include "radar_link.inc"
+.include "harbor_map.inc"
+.include "music.inc"
 
 .segment "BANKDATA"
 chr_bank_values:

@@ -15,7 +15,7 @@ zip_default:
 help_list:
     tiles 0, "UP DOWN   PORT  "
     tiles 0, "LEFT RIGHT RANGE"
-    tiles 0, "START   CONFIRM "
+    tiles 0, "START GO B MUSIC"
 help_zip:
     tiles 0, "UP DOWN   DIGIT "
     tiles 0, "LEFT RIGHT  MOVE"

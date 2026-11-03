@@ -39,7 +39,7 @@ $(METASPRITES): | $(BUILD)
 	$(PYTHON) -B $(SRC)/tools/generate_metasprites.py --output-dir $(dir $@)
 	touch $@
 
-$(BUILD)/nes_harbor.o: $(wildcard $(SRC)/nes/*.s $(SRC)/nes/*.inc $(VENDOR)/*.inc) $(METASPRITES)
+$(BUILD)/nes_harbor.o: $(wildcard $(SRC)/nes/*.s $(SRC)/nes/*.inc $(VENDOR)/*.inc $(SRC)/assets/splash/* $(SRC)/assets/ldv/*) $(METASPRITES)
 	cd $(SRC) && ca65 -g $(INCLUDES) -o $(abspath $@) nes/$(NAME).s
 
 $(ROM): $(BUILD)/nes_harbor.o $(SRC)/nes/cnrom256.cfg

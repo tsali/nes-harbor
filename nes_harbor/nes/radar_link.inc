@@ -345,7 +345,7 @@ radar_messages:
     jsr commit_oam_link
     jmp @advance
 :
-    jsr commit_oam
+    jsr commit_oam_map          ; and a row of the map, if one waits
 @advance:
     inc oam_rotation
     lda oam_rotation
@@ -518,7 +518,7 @@ radar_typed:      .res TYPED_MAX
     sta radar_slot
     lda #1
     sta radar_wait
-    rts
+    jmp harbor_map_begin
 .endproc
 
 ; One exchange towards a nesp32 that has the airport: the hello if it has
@@ -616,7 +616,10 @@ radar_typed:      .res TYPED_MAX
     cmp #MAX_TARGETS
     bcc @names
     dec radar_wait
-    bne @done
+    beq @scene
+    jmp harbor_turn             ; the frames between: a pan, or the map
+@scene:
+    jsr harbor_probe
     lda #POLL_FRAMES
     sta radar_wait
     lda radar_id

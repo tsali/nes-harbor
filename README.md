@@ -3,8 +3,8 @@
 Status: works end to end in the NESP32 build of Mesen against live AISHub
 data. Not yet tried on a real console.
 
-Ships on your NES. NES Harbor shows the vessels around a harbor on a
-radar scope, live, through a [NESP32](https://nesp32.retrobits.tv/) Wi-Fi
+Ships on your NES. NES Harbor shows the vessels around a harbor on an
+NES-pixel map of the coast, live, through a [NESP32](https://nesp32.retrobits.tv/) Wi-Fi
 board in controller port 2. Pick a port from the list (or type a US zip
 code), pick a range, and the nearest eight ships show up with their name,
 call sign, type, status, speed, course and distance.
@@ -30,13 +30,23 @@ On the picker:
 | Up / Down | port | digit |
 | Left / Right | range (3, 5, 10, 20, 40, 60 nm) | which digit |
 | Start or A | go | go |
-| B | | back to the list |
+| B | music on/off | back to the list |
 
 With a Bluetooth keyboard on the NESP32, type a zip code's digits, or a
 letter to jump to the next port starting with it.
 
-On the scope, as in NES Radar: Up/Down picks a ship, B goes back to the
-picker.
+On the map:
+
+| Button | Does |
+|---|---|
+| Up / Down | pick a ship |
+| Left / Right | range, at once |
+| A held + D-pad | move the map a quarter of the range |
+| B | back to the picker |
+
+The map is OpenStreetMap's, turned by the NESP32 into land and water
+cells (HARBOR's MAP op); the first one for a place takes a few seconds.
+The music is Drunken Sailor, a traditional shanty.
 
 | Field | What it shows |
 |---|---|
@@ -69,7 +79,8 @@ Needs cc65 and Python 3 with Pillow, and a checkout of
 
 `tools/gen_ports.py` writes the port list (`nes_harbor/nes/ports.inc`):
 edit `PORTS` there to change it. `tools/relabel_scope.py` relabels NES
-Radar's scope for ships.
+Radar's scope for ships and draws the map's tiles, `tools/make_splash.py`
+draws the title screen, and `tools/gen_music.py` writes the music.
 
 ## Credits
 
@@ -85,5 +96,7 @@ Radar's scope for ships.
   [retrobits](https://nesp32.retrobits.tv/)
 - Ship positions: [AISHub](https://www.aishub.net), from volunteers' AIS
   receivers
+- Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright)
+  contributors, ODbL
 
 GPL-3.0, as NES Radar is. See LICENSE.

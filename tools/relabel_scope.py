@@ -3,8 +3,9 @@
 
 Also its tiles (assets/ldv/ldv_bg.chr): the title bar says NES HARBOR,
 with inverse H, B and O drawn where nes-radar's small letters for its
-startup screen were (NES Harbor writes none), and the scope's rings lose
-their 3, 6 and 9, which were nautical miles at nes-radar's one range.
+startup screen were (NES Harbor writes none), and the scope's middle is
+the map's (harbor_map.inc): sixteen tiles of land and water where its rings
+were, and water to begin with.
 
 Aircraft fields become AIS ones: REG is the call sign, SQWK the navigational
 status, CAT the AIS ship type's digits, SPD and TRK speed and course over
@@ -33,7 +34,29 @@ TITLE = {"N": 0x5D, "E": 0x5E, "S": 0x5F, "R": 0x60, "A": 0x61, "D": 0x62,
          " ": 0x5C, **INV_SLOTS}
 TITLE_TEXT = " NES HARBOR"      # from column 1; the bar goes on after it
 TITLE_END = 20                  # TGT begins here
-RING_DIGITS = [0x6B, 0x7F, 0x96]  # the 9, 6 and 3 on the scope's line
+MAP_TILE_BASE = 0x70            # harbor_map.inc's: sixteen tiles of the map
+MAP_ROWS = range(3, 21)         # the scope's middle, which the map covers
+MAP_COLS = range(7, 25)
+WATER, LAND, FOAM = 1, 2, 3     # colours of BG0 and BG1 on the scope
+
+
+def map_tile(code):
+    """Tile `code` of the map: four 4x4 cells, bit 1 the north-west's land,
+    2 the north-east's, 4 the south-west's, 8 the south-east's. Water has a
+    wave or two, and foam where it meets the land."""
+    land = [[bool(code & (1 << ((y // 4) * 2 + x // 4))) for x in range(8)] for y in range(8)]
+    px = [[LAND if land[y][x] else WATER for x in range(8)] for y in range(8)]
+    for y, x in [(2, 1), (2, 2), (6, 5), (6, 6)]:
+        if not land[y][x]:
+            px[y][x] = FOAM
+    for y in range(8):
+        for x in range(8):
+            if land[y][x]:
+                continue
+            for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                if 0 <= y + dy < 8 and 0 <= x + dx < 8 and land[y + dy][x + dx]:
+                    px[y][x] = FOAM
+    return px
 
 
 def pixels(chr_data, tile):
@@ -63,12 +86,8 @@ def patch_chr(path):
     data = bytearray(open(path, "rb").read())
     for letter, slot in INV_SLOTS.items():
         put(data, slot, inverse(data, FONT.index(letter)))
-    for tile in RING_DIGITS:
-        px = pixels(data, tile)
-        for y in range(2, 8):
-            for x in range(1, 7):
-                px[y][x] = 0
-        put(data, tile, px)
+    for code in range(16):
+        put(data, MAP_TILE_BASE + code, map_tile(code))
     open(path, "wb").write(data)
     print(f"retiled {path}")
 
@@ -87,6 +106,9 @@ def main(path):
         if now != old:
             sys.exit(f"row {row} col {col}: {now!r}, not {old!r}")
         data[at:at + width] = bytes(FONT.index(c) for c in new.ljust(width))
+    for row in MAP_ROWS:                     # the scope's middle: water
+        for col in MAP_COLS:
+            data[row * 32 + col] = MAP_TILE_BASE
     at = TITLE_ROW * 32 + 1
     title = TITLE_TEXT[1:].ljust(TITLE_END - 1)
     data[at:at + len(title)] = bytes(TITLE[c] for c in title)
