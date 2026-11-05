@@ -1,19 +1,19 @@
 ; NES Harbor's map: the land and water round the place, under the ships.
 ;
 ; The nesp32 makes it (HARBOR's MAP): the scope's 144 points across as 18 by
-; 18 tiles, each tile four cells of land or water, a row of tiles to a
-; reply. This asks for a row on the frames between SCENEs, and draws a row
-; in the vblank that has the OAM in it, so a whole map takes 18 of each.
-; A map is known by its serial: MAP for row 0 every MAP_PROBE_FRAMES asks
-; whether there is a new one. A firmware with no MAP leaves the water.
+; 18 codes, each code four cells of land or water, a row of codes to a
+; reply. This asks for a row on the frames between SCENEs and keeps its
+; cells in map_mask, a bit a cell; when the last row has come the map is
+; drawn from there (harbor_view.inc), a screen row a frame. A map is known
+; by its serial: MAP for row 0 every MAP_PROBE_FRAMES asks whether there is
+; a new one. A firmware with no MAP leaves the water.
 ;
 ; A held with the pad moves the place by a quarter of the range (PAN): the
 ; nesp32 draws its ships again round the new middle at once, and makes a
 ; new map. The old one is painted over with water first.
 ;
 ; radar_link.inc calls harbor_turn on the frames between SCENEs, harbor_pan
-; from the pad, harbor_map_begin with radar_begin, and the scope commits
-; through commit_oam_map.
+; from the pad, and harbor_map_begin with radar_begin.
 
 .ifndef NESP_HARBOR_MAP
 NESP_HARBOR_MAP = $04
@@ -24,35 +24,22 @@ NESP_HARBOR_PAN = $05
 
 MAP_ROWS = 18
 MAP_COLS = 18
-MAP_BYTES = MAP_COLS / 2        ; a tile to a nibble
-MAP_ADDR = $2067                ; row 3, column 7: the scope's corner
-MAP_TILE_BASE = $70             ; the sixteen tiles: bit 1 NW land, 2 NE, 4 SW, 8 SE
+MAP_BYTES = MAP_COLS / 2        ; a code to a nibble: bit 1 NW land, 2 NE, 4 SW, 8 SE
 MAP_PROBE_FRAMES = 4            ; SCENE turns between asks for a new map
 MAP_HEAD = 3                    ; STATE, ID, MAP_SERIAL
 PAD_DIRECTIONS = BUTTON_UP | BUTTON_DOWN | BUTTON_LEFT | BUTTON_RIGHT
 
 .segment "BSS"
 map_row:        .res 1          ; the next row to ask for; MAP_ROWS when none
-map_row_ready:  .res 1          ; a row in map_row_tiles to draw, plus one
 map_want:       .res 1          ; the serial of the map being fetched
 map_have:       .res 1          ; and of the one fetched whole
-map_clear:      .res 1          ; the next row to paint water; MAP_ROWS when none
 map_probe_wait: .res 1
 map_absent:     .res 1          ; the nesp32 has no MAP
 pan_pending:    .res 1
 pan_dx:         .res 1
 pan_dy:         .res 1
-map_row_tiles:  .res MAP_COLS
-
-.segment "RODATA"
-map_row_lo:
-    .repeat MAP_ROWS, i
-        .byte <(MAP_ADDR + i * 32)
-    .endrepeat
-map_row_hi:
-    .repeat MAP_ROWS, i
-        .byte >(MAP_ADDR + i * 32)
-    .endrepeat
+mask_upper:     .res CELL_STRIDE    ; a reply's two rows of cells
+mask_lower:     .res CELL_STRIDE
 
 .segment "CODE"
 
@@ -62,7 +49,6 @@ map_row_hi:
     sta map_row
     sta map_have
     sta map_want
-    sta map_row_ready
     lda #MAP_PROBE_FRAMES
     sta map_probe_wait
     rts
@@ -70,8 +56,8 @@ map_row_hi:
 
 ; The place has moved, or its range: water over the old map, then the new.
 .proc map_repaint
-    lda #0
-    sta map_clear
+    lda #1
+    jsr map_render_begin
     jmp harbor_map_begin
 .endproc
 
@@ -130,12 +116,9 @@ map_row_hi:
     jmp map_repaint
 
 @map:
+    jsr tag_turn                ; the selected ship's full name, if wanted
+    bcs @done
     lda map_absent
-    bne @done
-    lda map_clear               ; the water first
-    cmp #MAP_ROWS
-    bcc @done
-    lda map_row_ready           ; and the last row drawn
     bne @done
     lda map_row
     cmp #MAP_ROWS
@@ -187,36 +170,16 @@ map_row_hi:
     lda nesp_reply_len
     cmp #MAP_HEAD + MAP_BYTES
     bne @done
-    ldx #0
-    ldy #0
-@code:
-    lda nesp_reply + MAP_HEAD,y
-    lsr a
-    lsr a
-    lsr a
-    lsr a
-    clc
-    adc #MAP_TILE_BASE
-    sta map_row_tiles,x
-    inx
-    lda nesp_reply + MAP_HEAD,y
-    and #$0F
-    clc
-    adc #MAP_TILE_BASE
-    sta map_row_tiles,x
-    inx
-    iny
-    cpy #MAP_BYTES
-    bne @code
+    jsr map_keep_row
     ldx map_row
     inx
-    stx map_row_ready
     stx map_row
     cpx #MAP_ROWS
     bne @done
     lda map_want
     sta map_have
-    rts
+    lda #0                      ; whole: draw it
+    jmp map_render_begin
 .endproc
 
 ; With each SCENE: now and then, whether there is a new map.
@@ -234,47 +197,77 @@ map_row_hi:
     rts
 .endproc
 
-; The scope's vblank with only the OAM in it, and a row of the map, or of
-; water, if one is waiting.
-.proc commit_oam_map
-    lda map_clear
-    cmp #MAP_ROWS
-    bcc @clear
-    lda map_row_ready
-    bne @row
-    jmp commit_oam
-@clear:
-    ldx #MAP_COLS - 1
-    lda #MAP_TILE_BASE
+; The reply's row of codes into map_mask: cell rows map_row * 2 and the
+; one after, a bit a cell from the left, the first in bit 7.
+.proc map_keep_row
+    ldx #CELL_STRIDE - 1
+    lda #0
 :
-    sta map_row_tiles,x
+    sta mask_upper,x
+    sta mask_lower,x
     dex
     bpl :-
-    ldy map_clear
-    inc map_clear
-    jmp @write
-@row:
-    tay
-    dey
-    lda #0
-    sta map_row_ready
-@write:
-    jsr begin_vram_update
-    lda #0
-    sta OAMADDR
-    lda #>oam_shadow
-    sta OAMDMA
-    bit PPUSTATUS
-    lda map_row_hi,y
-    sta PPUADDR
-    lda map_row_lo,y
-    sta PPUADDR
-    ldx #0
+    ldy #0                      ; the reply's byte
+@byte:
+    lda nesp_reply + MAP_HEAD,y
+    lsr a
+    lsr a
+    lsr a
+    lsr a
+    jsr @code                   ; the high nibble is the left code
+    lda nesp_reply + MAP_HEAD,y
+    and #$0F
+    jsr @code
+    iny
+    cpy #MAP_BYTES
+    bne @byte
+    ldx #4                      ; 36 cells, and four more to fill 40 bits
 :
-    lda map_row_tiles,x
-    sta PPUDATA
-    inx
-    cpx #MAP_COLS
+    clc
+    jsr @upper
+    clc
+    jsr @lower
+    dex
     bne :-
-    jmp restore_scroll
+    lda map_row                 ; to rows map_row * 2 and the next
+    asl a
+    asl a
+    adc map_row
+    asl a                       ; map_row * 10
+    tax
+    ldy #0
+:
+    lda mask_upper,y
+    sta map_mask,x
+    lda mask_lower,y
+    sta map_mask + CELL_STRIDE,x
+    inx
+    iny
+    cpy #CELL_STRIDE
+    bne :-
+    rts
+
+@code:
+    sta temp
+    lsr temp                    ; NW
+    jsr @upper
+    lsr temp                    ; NE
+    jsr @upper
+    lsr temp                    ; SW
+    jsr @lower
+    lsr temp                    ; SE
+@lower:
+    rol mask_lower + 4
+    rol mask_lower + 3
+    rol mask_lower + 2
+    rol mask_lower + 1
+    rol mask_lower + 0
+    rts
+@upper:
+    rol mask_upper + 4
+    rol mask_upper + 3
+    rol mask_upper + 2
+    rol mask_upper + 1
+    rol mask_upper + 0
+    rts
 .endproc

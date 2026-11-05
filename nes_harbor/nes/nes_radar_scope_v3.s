@@ -1,7 +1,8 @@
-; NES Radar Scope v2 -- LDV display layer
+; NES Harbor, from NES Radar Scope v2
 ;
-; Starts with a controller-1 ICAO editor, then asks a nesp32 on controller
-; port 2 for the airport and its aircraft (nes/radar_link.inc).
+; Starts with a controller-1 port picker, then asks a nesp32 on controller
+; port 2 for the place and its ships (nes/radar_link.inc), and shows them
+; on the overworld map (nes/harbor_view.inc).
 
 .setcpu "6502"
 
@@ -21,7 +22,7 @@ APUSTATUS = $4015
 MAX_TARGETS       = 8
 RECORD_SIZE       = 9
 IDENTITY_RECORD_SIZE = 25
-MAX_PAYLOAD       = 200
+MAX_PAYLOAD       = MAX_TARGETS * RECORD_SIZE
 
 SCENE_STALE       = $01
 SCENE_SEVERE      = $1C
@@ -50,25 +51,6 @@ STARTUP_MESSAGE_ADDR = $21E8     ; row 15, column 8
 STARTUP_SPRITE_Y    = 12 * 8 - 1
 STARTUP_SPRITE_X    = 14 * 8
 STARTUP_SPRITE_PALETTE = 2
-
-SCOPE_ORIGIN_X    = 56
-SCOPE_ORIGIN_Y    = 24
-META_CENTRE_X     = 7
-META_CENTRE_Y     = 7
-META_LDV_OFFSET_X_LEFT  = SCOPE_ORIGIN_X - META_CENTRE_X
-META_LDV_OFFSET_X_RIGHT = META_LDV_OFFSET_X_LEFT + 8
-META_LDV_OFFSET_Y       = SCOPE_ORIGIN_Y - META_CENTRE_Y - 1
-
-SEL_TGT  = 0
-SEL_TYPE = 2
-SEL_REG  = 6
-SEL_SQWK = 12
-SEL_CAT  = 16
-SEL_ALT  = 18
-SEL_SPD  = 23
-SEL_TRK  = 26
-SEL_VS   = 29
-SEL_DIST = 34
 
 STATUS_COUNT = 0
 STATUS_APT   = 2
@@ -119,7 +101,6 @@ VERSION_STAMP_ADDR    = $236D     ; row 27, column 13 -- one blank row below
 
 .include "ldv_screen.inc"
 .include "harbor_text.inc"
-.include "assets_metasprite.inc"
 
 .segment "ZEROPAGE"
 packet_flags:   .res 1
@@ -136,8 +117,6 @@ digit_hundreds: .res 1
 digit_tens:     .res 1
 digit_ones:     .res 1
 rec_offset:     .res 1
-meta_left:      .res 1
-meta_right:     .res 1
 vblank_ready:   .res 1
 controller_current: .res 1
 controller_previous: .res 1
@@ -159,8 +138,6 @@ selected_slot:  .res 1
 previous_selected_slot: .res 1
 oam_rotation:   .res 1
 track_value:    .res 1
-table_slot_index: .res 1
-table_rows_left: .res 1
 displayed_count: .res 1
 link_age_lo:     .res 1
 link_age_hi:     .res 1
@@ -178,7 +155,6 @@ oam_shadow:     .res 256
 scene_payload:  .res MAX_PAYLOAD
 identity_tiles: .res 192
 icao_code:      .res 4
-selected_fields: .res 37
 status_fields:   .res STATUS_SIZE
 startup_cursor:  .res ZIP_LEN
 zip_code:        .res ZIP_LEN  ; ASCII digits
@@ -699,157 +675,7 @@ radar_editor:                     ; nes/radar_link.inc comes back here
     rts
 .endproc
 
-; Translate validated scene records into the first sixteen OAM entries. Each
-; stable slot owns two adjacent 8x16 entries forming one 16x16 marker.
-.proc build_oam_shadow
-    ldx #0
-    lda #$FF
-@hide:
-    sta oam_shadow,x
-    inx
-    inx
-    inx
-    inx
-    cpx #64
-    bne @hide
-
-    lda packet_count
-    sta records_left
-    ldy #0
-@record:
-    lda records_left
-    bne :+
-    jmp @done
-:
-    sty rec_offset
-
-    lda scene_payload,y
-    sta record_flags
-    and #$07
-    sta slot_number
-
-    ; Keep the selected marker in the first OAM pair. Rotate the other seven
-    ; complete two-sprite markers around it so scanline overflow flickers like
-    ; an NES-era object group instead of permanently damaging one target.
-    cmp selected_slot
-    beq @selected_priority
-    sec
-    sbc oam_rotation
-    and #7
-    sta temp                       ; cyclic rank of this slot
-    lda selected_slot
-    sec
-    sbc oam_rotation
-    and #7
-    sta panel_offset               ; cyclic rank removed for selected slot
-    lda temp
-    cmp panel_offset
-    bcs @priority_ready
-    clc
-    adc #1                         ; leave OAM pair zero for selected target
-@priority_ready:
-    asl a
-    asl a
-    asl a                          ; rotated OAM position * 8
-    tax
-    jmp @priority_set
-@selected_priority:
-    ldx #0
-@priority_set:
-
-    ; Resolve the independently banked left/right pattern variants.
-    lda record_flags
-    and #TRACK_INVALID
-    beq @have_track
-    lda #META_NO_TRACK_LEFT
-    sta meta_left
-    lda #META_NO_TRACK_RIGHT
-    sta meta_right
-    jmp @variants_ready
-@have_track:
-    lda scene_payload + 3,y
-    clc
-    adc #16                       ; nearest 45-degree sector
-    lsr a
-    lsr a
-    lsr a
-    lsr a
-    lsr a
-    tay
-    lda meta_left_variant,y
-    sta meta_left
-    lda meta_right_variant,y
-    sta meta_right
-@variants_ready:
-    ldy rec_offset
-
-    ; Shared Y for both 8x16 halves.
-    lda scene_payload + 2,y
-    clc
-    adc #META_LDV_OFFSET_Y
-    sta oam_shadow + 0,x
-    sta oam_shadow + 4,x
-
-    ; Left tile: (slot * 6 + variant) << 1 | 1.
-    lda slot_number
-    asl a
-    sta temp                       ; slot * 2
-    asl a
-    clc
-    adc temp
-    clc
-    adc meta_left
-    asl a
-    ora #1                         ; odd tile selects pattern table $1000
-    sta oam_shadow + 1,x
-
-    ; Right tile: (48 + slot * 4 + variant) << 1 | 1.
-    lda slot_number
-    asl a
-    asl a
-    clc
-    adc meta_right
-    clc
-    adc #META_RIGHT_PAIR_BASE
-    asl a
-    ora #1
-    sta oam_shadow + 5,x
-
-    ; Both halves share attributes. Palette 1 belongs only to the selected
-    ; target; packet alert flags do not alter the LDV table-row colours.
-    lda #0
-    sta oam_shadow + 2,x
-    sta oam_shadow + 6,x
-    lda slot_number
-    cmp selected_slot
-    bne @not_selected
-    lda #1
-    sta oam_shadow + 2,x
-    sta oam_shadow + 6,x
-@not_selected:
-
-    ; Two halves are exactly eight pixels apart.
-    lda scene_payload + 1,y
-    clc
-    adc #META_LDV_OFFSET_X_LEFT
-    sta oam_shadow + 3,x
-    lda scene_payload + 1,y
-    clc
-    adc #META_LDV_OFFSET_X_RIGHT
-    sta oam_shadow + 7,x
-
-    tya
-    clc
-    adc #RECORD_SIZE
-    tay
-    dec records_left
-    beq @done
-    jmp @record
-@done:
-    rts
-.endproc
-
-; Clear all dynamic LDV character buffers.
+; Clear the ships' names and the status bar's fields.
 .proc initialize_display_buffers
     ldx #0
     lda #CHAR_SPACE
@@ -859,26 +685,11 @@ radar_editor:                     ; nes/radar_link.inc comes back here
     cpx #192
     bne @identity
     ldx #0
-@selected:
-    sta selected_fields,x
-    inx
-    cpx #37
-    bne @selected
-    ldx #0
 @status:
     sta status_fields,x
     inx
     cpx #STATUS_SIZE
     bne @status
-
-    ldx #0
-@airport:
-    lda icao_code,x
-    jsr identity_char_tile
-    sta status_fields + STATUS_APT,x
-    inx
-    cpx #4
-    bne @airport
     jsr set_link_waiting
     lda #CHAR_SPACE
     sta status_fields + STATUS_COUNT
@@ -951,16 +762,16 @@ radar_editor:                     ; nes/radar_link.inc comes back here
     jmp move_selection
 .endproc
 
-; A new range on the scope: its corner now, and the place again with it,
-; which the nesp32 takes as the same place drawn again to the new range
+; A new range on the map: the status bar's now, and the place again with
+; it, which the nesp32 takes as the same place drawn again to the new range
 ; (a new id, no fetch).
 .proc scope_rerange
     inc radar_id
     lda #0
     sta radar_chosen            ; radar_poll says the place again
-    jsr begin_vram_update
-    jsr write_scope_range
-    jsr restore_scroll
+    lda #STAT_DIRTY_LINE
+    ora status_dirty
+    sta status_dirty
     jmp map_repaint             ; and a map to the new range
 .endproc
 
@@ -1027,234 +838,6 @@ radar_editor:                     ; nes/radar_link.inc comes back here
 .endproc
 
 
-.proc build_selected_identity
-    lda active_slots
-    beq @done
-    ldx selected_slot
-    lda slot_masks,x
-    and active_slots
-    beq @done
-    lda selected_slot
-    asl a
-    asl a
-    asl a                          ; slot * 8
-    sta temp
-    asl a                          ; slot * 16
-    clc
-    adc temp                       ; slot * 24
-    clc
-    adc #8                         ; aircraft type follows callsign[8]
-    tay
-    ldx #0
-@copy:
-    lda identity_tiles,y
-    sta selected_fields + SEL_TYPE,x
-    iny
-    inx
-    cpx #16                        ; TYPE, REG, SQWK, CAT are contiguous
-    bne @copy
-@done:
-    rts
-.endproc
-
-; Rebuild all 37 selected-aircraft characters from protocol v2 identity and
-; motion records.
-.proc build_selected_fields
-    ldx #0
-    lda #CHAR_SPACE
-@clear:
-    sta selected_fields,x
-    inx
-    cpx #37
-    bne @clear
-    lda active_slots
-    bne :+
-    jmp @done
-:
-    lda #CHAR_SPACE
-    sta selected_fields + SEL_TGT
-    lda selected_slot
-    clc
-    adc #CHAR_0 + 1
-    sta selected_fields + SEL_TGT + 1
-    jsr build_selected_identity
-
-    lda packet_count
-    sta records_left
-    ldy #0
-@record:
-    lda records_left
-    bne :+
-    jmp @done
-:
-    lda scene_payload,y
-    and #7
-    cmp selected_slot
-    beq @found
-    tya
-    clc
-    adc #RECORD_SIZE
-    tay
-    dec records_left
-    bne @record
-    rts
-@found:
-    sty rec_offset
-    lda scene_payload,y
-    sta record_flags
-    and #ALT_INVALID
-    bne @speed
-    lda scene_payload + 4,y
-    sta value_lo
-    lda scene_payload + 5,y
-    sta value_hi
-    jsr convert_u16_3digits
-    ldx #0
-    lda digit_hundreds
-    jsr store_alt_digit
-    lda digit_tens
-    jsr store_alt_digit
-    lda digit_ones
-    jsr store_alt_digit
-    lda #CHAR_0
-    sta selected_fields + SEL_ALT + 3
-    sta selected_fields + SEL_ALT + 4
-@speed:
-    ldy rec_offset
-    lda record_flags
-    and #SPEED_INVALID
-    bne @track
-    lda scene_payload + 6,y
-    sta value_lo
-    lda #0
-    sta value_hi
-    jsr convert_u16_3digits
-    ldx #0
-    lda digit_hundreds
-    jsr store_speed_digit
-    lda digit_tens
-    jsr store_speed_digit
-    lda digit_ones
-    jsr store_speed_digit
-@track:
-    lda record_flags
-    and #TRACK_INVALID
-    bne @vertical
-    ldy rec_offset
-    lda scene_payload + 3,y
-    sta track_value
-    lda #0
-    sta value_lo
-    sta value_hi
-    ldx #45
-@multiply_45:
-    clc
-    lda value_lo
-    adc track_value
-    sta value_lo
-    lda value_hi
-    adc #0
-    sta value_hi
-    dex
-    bne @multiply_45
-    clc                             ; round (track * 45) / 32
-    lda value_lo
-    adc #16
-    sta value_lo
-    lda value_hi
-    adc #0
-    sta value_hi
-    ldx #5
-@divide_32:
-    lsr value_hi
-    ror value_lo
-    dex
-    bne @divide_32
-    jsr convert_u16_3digits
-    ldx #0
-    lda digit_hundreds
-    jsr store_track_digit
-    lda digit_tens
-    jsr store_track_digit
-    lda digit_ones
-    jsr store_track_digit
-@vertical:
-    ldy rec_offset
-    lda scene_payload + 7,y
-    cmp #$80                        ; signed-rate unavailable sentinel
-    beq @distance
-    bcc @vertical_positive
-    ldx #CHAR_HYPHEN
-    eor #$FF
-    clc
-    adc #1
-    jmp @vertical_magnitude
-@vertical_positive:
-    ldx #CHAR_PLUS
-@vertical_magnitude:
-    stx selected_fields + SEL_VS
-    sta value_lo
-    lda #0
-    sta value_hi
-    jsr convert_u16_3digits
-    lda digit_tens
-    clc
-    adc #CHAR_0
-    sta selected_fields + SEL_VS + 1
-    lda digit_ones
-    clc
-    adc #CHAR_0
-    sta selected_fields + SEL_VS + 2
-    lda #CHAR_0
-    sta selected_fields + SEL_VS + 3
-    sta selected_fields + SEL_VS + 4
-@distance:
-    ldy rec_offset
-    lda scene_payload + 8,y
-    cmp #$FF                        ; distance unavailable sentinel
-    beq @done
-    sta value_lo
-    lda #0
-    sta value_hi
-    jsr convert_u16_3digits
-    lda digit_tens
-    clc
-    adc #CHAR_0
-    sta selected_fields + SEL_DIST
-    lda #CHAR_DOT
-    sta selected_fields + SEL_DIST + 1
-    lda digit_ones
-    clc
-    adc #CHAR_0
-    sta selected_fields + SEL_DIST + 2
-@done:
-    rts
-.endproc
-
-.proc store_alt_digit
-    clc
-    adc #CHAR_0
-    sta selected_fields + SEL_ALT,x
-    inx
-    rts
-.endproc
-
-.proc store_speed_digit
-    clc
-    adc #CHAR_0
-    sta selected_fields + SEL_SPD,x
-    inx
-    rts
-.endproc
-
-.proc store_track_digit
-    clc
-    adc #CHAR_0
-    sta selected_fields + SEL_TRK,x
-    inx
-    rts
-.endproc
-
 .proc build_status_fields
     lda #CHAR_SPACE
     sta status_fields + STATUS_COUNT
@@ -1266,10 +849,8 @@ radar_editor:                     ; nes/radar_link.inc comes back here
     jmp set_link_live
 .endproc
 
-; Remove every visible aircraft while preserving cached identity text for a
-; clean recovery when the next current scene arrives. Nothing calls this now
-; that WAITING retains its targets. Kept because it is the only correct
-; response if a reason to blank the scope comes back.
+; Remove every ship while keeping their names, for a scene that cannot be
+; shown.
 .proc clear_target_state
     lda #0
     sta active_slots
@@ -1278,12 +859,13 @@ radar_editor:                     ; nes/radar_link.inc comes back here
     sta selected_slot
     sta previous_selected_slot
     sta oam_rotation
-    jsr build_oam_shadow
-    jsr build_selected_fields
+    jsr ships_from_scene
     lda #CHAR_SPACE
     sta status_fields + STATUS_COUNT
     lda #CHAR_0
     sta status_fields + STATUS_COUNT + 1
+    lda #1
+    sta tag_dirty
     rts
 .endproc
 
@@ -1324,26 +906,13 @@ radar_editor:                     ; nes/radar_link.inc comes back here
     rts
 .endproc
 
-; The LINK field alone, for a caller that has just found vblank.
-.proc write_link_during_vblank
-    lda #<(status_fields + STATUS_LINK)
-    sta field_src
-    lda #>(status_fields + STATUS_LINK)
-    sta field_src + 1
-    lda #FONT_DIM_BASE
-    sta field_font
-    ldy #LINK_STATE_WIDTH
-    lda #>FLD_LINK
-    ldx #<FLD_LINK
-    jsr write_field
-    jsr restore_scroll
-    rts
-.endproc
-
 .proc set_link_waiting
     lda #<link_waiting_chars
     ldx #>link_waiting_chars
-    jmp copy_link_state
+    jsr copy_link_state
+    lda #SIGNAL_STALE
+    sta signal_cap
+    rts
 .endproc
 
 ; A scene from the nesp32 is on the scope and it is good. The dots after it
@@ -1354,6 +923,8 @@ radar_editor:                     ; nes/radar_link.inc comes back here
     jsr copy_link_state
     lda #1
     sta link_live
+    lda #SIGNAL_LIVE
+    sta signal_cap
     rts
 .endproc
 
@@ -1371,6 +942,7 @@ radar_editor:                     ; nes/radar_link.inc comes back here
     ldy #0
     sty link_live
     sty link_stream
+    sty signal_cap              ; no signal, unless the caller says
 @copy:
     lda (field_src),y
     sta status_fields + STATUS_LINK,y
@@ -1606,22 +1178,6 @@ radar_editor:                     ; nes/radar_link.inc comes back here
     rts
 .endproc
 
-; The scope's corner, where nes-radar's says 09NM: the range chosen. With
-; rendering off, as initialize_video writes.
-.proc write_scope_range
-    jsr range_digits
-    lda #<(picker_tiles + ZIP_LEN)
-    sta field_src
-    lda #>(picker_tiles + ZIP_LEN)
-    sta field_src + 1
-    lda #FONT_DIM_BASE
-    sta field_font
-    ldy #2
-    lda #>SCOPE_RANGE_ADDR
-    ldx #<SCOPE_RANGE_ADDR
-    jmp write_field
-.endproc
-
 .proc help_next
     lda field_src
     clc
@@ -1663,6 +1219,7 @@ radar_editor:                     ; nes/radar_link.inc comes back here
 .proc initialize_startup_video
     lda #0
     sta PPUMASK
+    sta ppu_bg
     lda #CHR_BANK_RADAR
     jsr select_chr_bank
     jsr load_ldv_palette
@@ -1711,106 +1268,6 @@ radar_editor:                     ; nes/radar_link.inc comes back here
     lda #PPUCTRL_SPR_8X16
     sta PPUCTRL
     lda #SHOW_STARTUP
-    sta PPUMASK
-    rts
-.endproc
-
-.proc initialize_video
-    lda #0
-    sta PPUMASK
-    sta controller_pending
-    sta controller_previous
-    sta displayed_count
-    sta link_age_lo
-    sta link_age_hi
-    sta link_timed_out
-    sta navigation_requested
-    lda #1
-    jsr load_ldv_palette
-    bit PPUSTATUS                 ; the scope's middle is the map: BG0 as BG1,
-    lda #$3F                      ; water, land and foam
-    sta PPUADDR
-    lda #$01
-    sta PPUADDR
-    ldx #1
-:
-    lda ldv_palette + 4,x
-    sta PPUDATA
-    inx
-    cpx #4
-    bne :-
-    lda #$3F                      ; and the ships white, to be seen on land
-    sta PPUADDR
-    lda #$11
-    sta PPUADDR
-    lda #$30
-    sta PPUDATA
-
-    bit PPUSTATUS
-    lda #$20
-    sta PPUADDR
-    lda #$00
-    sta PPUADDR
-    ldx #0
-@nametable_0:
-    lda ldv_bg_nam,x
-    sta PPUDATA
-    inx
-    bne @nametable_0
-    ldx #0
-@nametable_1:
-    lda ldv_bg_nam + 256,x
-    sta PPUDATA
-    inx
-    bne @nametable_1
-    ldx #0
-@nametable_2:
-    lda ldv_bg_nam + 512,x
-    sta PPUDATA
-    inx
-    bne @nametable_2
-    ldx #0
-@nametable_3:
-    lda ldv_bg_nam + 768,x
-    sta PPUDATA
-    inx
-    cpx #192
-    bne @nametable_3
-
-    bit PPUSTATUS
-    lda #$23
-    sta PPUADDR
-    lda #$C0
-    sta PPUADDR
-    ldx #0
-@attributes:
-    lda ldv_bg_att,x
-    sta PPUDATA
-    inx
-    cpx #64
-    bne @attributes
-
-    ; Rendering is still off, so the short dynamic status fields go now.
-    jsr write_status_frame
-    jsr write_scope_range
-
-    ldx #0
-    lda #$FF
-@clear_oam:
-    sta oam_shadow,x
-    inx
-    bne @clear_oam
-    lda #0
-    sta OAMADDR
-    lda #>oam_shadow
-    sta OAMDMA
-
-    lda #0
-    sta PPUSCROLL
-    sta PPUSCROLL
-    lda #PPUCTRL_SPR_8X16
-    sta PPUCTRL
-    lda #SHOW_SCOPE
     sta PPUMASK
     rts
 .endproc
@@ -1946,317 +1403,6 @@ radar_editor:                     ; nes/radar_link.inc comes back here
     rts
 .endproc
 
-; The LDV contract's four rendered vblanks. Frame A also performs OAM DMA;
-; rendering remains enabled throughout every dynamic update.
-.proc commit_display
-    jsr begin_vram_update
-    lda #0
-    sta OAMADDR
-    lda #>oam_shadow
-    sta OAMDMA
-    jsr write_selected_frame
-    jsr restore_scroll
-
-    jsr begin_vram_update
-    ldx #0
-    jsr write_table_half
-    jsr restore_scroll
-
-    jsr begin_vram_update
-    ldx #4
-    jsr write_table_half
-    jsr restore_scroll
-
-    jsr begin_vram_update
-    jsr write_status_frame
-    jsr restore_scroll
-    rts
-.endproc
-
-; A selection-only change fits in one rendered vblank: OAM DMA, the 37-tile
-; selected panel, and two one-tile table-slot updates.
-.proc commit_selection
-    jsr begin_vram_update
-    lda #0
-    sta OAMADDR
-    lda #>oam_shadow
-    sta OAMDMA
-    jmp commit_selection_fields
-.endproc
-
-; The nametable half of commit_selection. Counted, because this runs on a
-; vblank found by polling rather than by NMI and the margin is what keeps it
-; off the visible frame:
-;
-;   OAM DMA                 about  520
-;   write_selected_frame    about 1336 cycles, 35 tiles across nine fields
-;   write_selection_slots   about   66
-;   restore_scroll          about   36
-;                          -----
-;                           about 1958, against 2273 cycles of NTSC vblank
-.proc commit_selection_fields
-    jsr write_selected_frame
-    jsr write_selection_slots
-    jsr restore_scroll
-    rts
-.endproc
-
-; The targets' turn in front changes only OAM priority: one DMA.
-.proc commit_oam
-    jsr begin_vram_update
-    lda #0
-    sta OAMADDR
-    lda #>oam_shadow
-    sta OAMDMA
-    jsr restore_scroll
-    rts
-.endproc
-
-.proc write_selection_slots
-    ldx previous_selected_slot
-    bit PPUSTATUS
-    lda table_slot_addr_hi,x
-    sta PPUADDR
-    lda table_slot_addr_lo,x
-    sta PPUADDR
-    txa
-    clc
-    adc #CHAR_0 + 1 + FONT_BASE
-    sta PPUDATA
-
-    ldx selected_slot
-    bit PPUSTATUS
-    lda table_slot_addr_hi,x
-    sta PPUADDR
-    lda table_slot_addr_lo,x
-    sta PPUADDR
-    txa
-    clc
-    adc #FONT_INV_BASE
-    sta PPUDATA
-    rts
-.endproc
-
-.proc write_selected_frame
-    ; FLD_TGT is the one mixed-font field: a dim space plus inverse slot digit.
-    bit PPUSTATUS
-    lda #>FLD_TGT
-    sta PPUADDR
-    lda #<FLD_TGT
-    sta PPUADDR
-    lda #CHAR_SPACE + FONT_DIM_BASE
-    sta PPUDATA
-    lda active_slots
-    beq @blank_target
-    lda selected_slot
-    clc
-    adc #FONT_INV_BASE
-    bne @target_ready
-@blank_target:
-    lda #CHAR_SPACE + FONT_DIM_BASE
-@target_ready:
-    sta PPUDATA
-
-    lda #FONT_DIM_BASE
-    sta field_font
-    lda #<(selected_fields + SEL_TYPE)
-    sta field_src
-    lda #>(selected_fields + SEL_TYPE)
-    sta field_src + 1
-    ldy #4
-    lda #>FLD_TYPE
-    ldx #<FLD_TYPE
-    jsr write_field
-    lda #<(selected_fields + SEL_REG)
-    sta field_src
-    lda #>(selected_fields + SEL_REG)
-    sta field_src + 1
-    ldy #6
-    lda #>FLD_REG
-    ldx #<FLD_REG
-    jsr write_field
-    lda #<(selected_fields + SEL_SQWK)
-    sta field_src
-    lda #>(selected_fields + SEL_SQWK)
-    sta field_src + 1
-    ldy #4
-    lda #>FLD_SQWK
-    ldx #<FLD_SQWK
-    jsr write_field
-    lda #<(selected_fields + SEL_CAT)
-    sta field_src
-    lda #>(selected_fields + SEL_CAT)
-    sta field_src + 1
-    ldy #2
-    lda #>FLD_CAT
-    ldx #<FLD_CAT
-    jsr write_field
-    lda #<(selected_fields + SEL_ALT)
-    sta field_src
-    lda #>(selected_fields + SEL_ALT)
-    sta field_src + 1
-    ldy #5
-    lda #>FLD_ALT
-    ldx #<FLD_ALT
-    jsr write_field
-    lda #<(selected_fields + SEL_SPD)
-    sta field_src
-    lda #>(selected_fields + SEL_SPD)
-    sta field_src + 1
-    ldy #3
-    lda #>FLD_SPD
-    ldx #<FLD_SPD
-    jsr write_field
-    lda #<(selected_fields + SEL_TRK)
-    sta field_src
-    lda #>(selected_fields + SEL_TRK)
-    sta field_src + 1
-    ldy #3
-    lda #>FLD_TRK
-    ldx #<FLD_TRK
-    jsr write_field
-    lda #<(selected_fields + SEL_VS)
-    sta field_src
-    lda #>(selected_fields + SEL_VS)
-    sta field_src + 1
-    ldy #5
-    lda #>FLD_VS
-    ldx #<FLD_VS
-    jsr write_field
-    lda #<(selected_fields + SEL_DIST)
-    sta field_src
-    lda #>(selected_fields + SEL_DIST)
-    sta field_src + 1
-    ldy #3
-    lda #>FLD_DIST
-    ldx #<FLD_DIST
-    jsr write_field
-    rts
-.endproc
-
-; Four slots: slot digit, seven callsign characters, four type characters.
-.proc write_table_half
-    stx table_slot_index
-    lda #4
-    sta table_rows_left
-@slot:
-    ldx table_slot_index
-    bit PPUSTATUS
-    lda table_slot_addr_hi,x
-    sta PPUADDR
-    lda table_slot_addr_lo,x
-    sta PPUADDR
-    cpx selected_slot
-    bne @normal_slot
-    lda active_slots
-    and slot_masks,x
-    beq @normal_slot
-    txa
-    clc
-    adc #FONT_INV_BASE
-    bne @write_slot
-@normal_slot:
-    txa
-    clc
-    adc #CHAR_0 + 1 + FONT_BASE
-@write_slot:
-    sta PPUDATA
-
-    lda table_slot_index
-    asl a
-    asl a
-    asl a                          ; slot * 8
-    sta temp
-    asl a                          ; slot * 16
-    clc
-    adc temp                       ; slot * 24
-    clc
-    adc #<identity_tiles
-    sta field_src
-    lda #>identity_tiles
-    adc #0
-    sta field_src + 1
-    ldx table_slot_index
-    lda slot_masks,x
-    and active_slots
-    bne @identity_source_ready
-    lda #<blank_identity_row
-    sta field_src
-    lda #>blank_identity_row
-    sta field_src + 1
-@identity_source_ready:
-    lda table_slot_index
-    and #1
-    beq @bright_row
-    lda #FONT_BASE
-    bne @font_ready
-@bright_row:
-    lda #FONT_DIM_BASE
-@font_ready:
-    sta field_font
-    ldx table_slot_index
-    ldy #7
-    lda table_call_addr_hi,x
-    pha
-    lda table_call_addr_lo,x
-    tax
-    pla
-    jsr write_field
-
-    clc
-    lda field_src
-    adc #8
-    sta field_src
-    lda field_src + 1
-    adc #0
-    sta field_src + 1
-    ldx table_slot_index
-    ldy #4
-    lda table_type_addr_hi,x
-    pha
-    lda table_type_addr_lo,x
-    tax
-    pla
-    jsr write_field
-
-    inc table_slot_index
-    dec table_rows_left
-    beq :+
-    jmp @slot
-:
-    rts
-.endproc
-
-.proc write_status_frame
-    lda #FONT_DIM_BASE
-    sta field_font
-    lda #<(status_fields + STATUS_COUNT)
-    sta field_src
-    lda #>(status_fields + STATUS_COUNT)
-    sta field_src + 1
-    ldy #2
-    lda #>FLD_COUNT
-    ldx #<FLD_COUNT
-    jsr write_field
-    lda #<(status_fields + STATUS_APT)
-    sta field_src
-    lda #>(status_fields + STATUS_APT)
-    sta field_src + 1
-    ldy #4
-    lda #>FLD_APT
-    ldx #<FLD_APT
-    jsr write_field
-    lda #<(status_fields + STATUS_LINK)
-    sta field_src
-    lda #>(status_fields + STATUS_LINK)
-    sta field_src + 1
-    ldy #LINK_STATE_WIDTH
-    lda #>FLD_LINK
-    ldx #<FLD_LINK
-    jsr write_field
-    rts
-.endproc
-
 ; A:X = PPU address high:low, field_src = source character indices,
 ; Y = fixed width, field_font = font base. Every call writes exactly Y tiles.
 .proc write_field
@@ -2280,12 +1426,13 @@ radar_editor:                     ; nes/radar_link.inc comes back here
     rts
 .endproc
 
-; A link state, A:X as copy_link_state's, on the screen at once.
+; A link state, A:X as copy_link_state's, on the status bar.
 .proc show_link
     jsr copy_link_state
-    jsr begin_vram_update
-    jsr write_status_frame
-    jmp restore_scroll
+    lda #STAT_DIRTY_LINE | STAT_DIRTY_METER
+    ora status_dirty
+    sta status_dirty
+    rts
 .endproc
 
 ; One frame of the dots after LIVE: one, two, three, a step every
@@ -2358,11 +1505,13 @@ radar_editor:                     ; nes/radar_link.inc comes back here
     sta vblank_ready
     bit PPUSTATUS
     lda #PPUCTRL_UPDATE_NMI
+    ora ppu_bg                    ; the frame's background table, throughout
     sta PPUCTRL
 @wait:
     lda vblank_ready
     beq @wait
     lda #PPUCTRL_SPR_8X16
+    ora ppu_bg
     sta PPUCTRL
     bit PPUSTATUS
     rts
@@ -2377,6 +1526,7 @@ radar_editor:                     ; nes/radar_link.inc comes back here
     sta PPUSCROLL
     sta PPUSCROLL
     lda #PPUCTRL_SPR_8X16
+    ora ppu_bg
     sta PPUCTRL
     jmp music_tick              ; a vblank's writes are done: a frame of music
 .endproc
@@ -2567,6 +1717,7 @@ radar_editor:                     ; nes/radar_link.inc comes back here
 
 .include "harbor_data.inc"
 .include "radar_link.inc"
+.include "harbor_view.inc"
 .include "harbor_map.inc"
 .include "harbor_card.inc"
 .include "music.inc"
@@ -2623,26 +1774,6 @@ startup_invalid_chars:
 startup_blank_16:
     .res 16, CHAR_SPACE
 
-table_slot_addr_hi:
-    .byte >TBL1_SLOT,>TBL2_SLOT,>TBL3_SLOT,>TBL4_SLOT,>TBL5_SLOT,>TBL6_SLOT,>TBL7_SLOT,>TBL8_SLOT
-table_slot_addr_lo:
-    .byte <TBL1_SLOT,<TBL2_SLOT,<TBL3_SLOT,<TBL4_SLOT,<TBL5_SLOT,<TBL6_SLOT,<TBL7_SLOT,<TBL8_SLOT
-table_call_addr_hi:
-    .byte >TBL1_CALL,>TBL2_CALL,>TBL3_CALL,>TBL4_CALL,>TBL5_CALL,>TBL6_CALL,>TBL7_CALL,>TBL8_CALL
-table_call_addr_lo:
-    .byte <TBL1_CALL,<TBL2_CALL,<TBL3_CALL,<TBL4_CALL,<TBL5_CALL,<TBL6_CALL,<TBL7_CALL,<TBL8_CALL
-table_type_addr_hi:
-    .byte >TBL1_TYPE,>TBL2_TYPE,>TBL3_TYPE,>TBL4_TYPE,>TBL5_TYPE,>TBL6_TYPE,>TBL7_TYPE,>TBL8_TYPE
-table_type_addr_lo:
-    .byte <TBL1_TYPE,<TBL2_TYPE,<TBL3_TYPE,<TBL4_TYPE,<TBL5_TYPE,<TBL6_TYPE,<TBL7_TYPE,<TBL8_TYPE
-
-.include "assets_metasprite_tables.inc"
-
-ldv_bg_nam:
-    .incbin "assets/ldv/ldv_bg.nam"
-ldv_bg_att:
-    .incbin "assets/ldv/ldv_bg.att"
-
 .segment "VECTORS"
     .addr nmi, reset, irq
 
@@ -2666,16 +1797,16 @@ ldv_bg_att:
     .res $1000 - (VER_GLYPH_BASE + VER_GLYPH_COUNT) * 16, $00
     .res $1000, $00
 
-.segment "CHR1"
-    .incbin "assets/ldv/ldv_bg.chr"
-    .incbin "build/radar_sprites_16.chr"
+.segment "CHR1"                  ; tools/make_overworld.py's
+    .incbin "assets/overworld/harbor_a.chr"
+    .incbin "assets/overworld/harbor_b.chr"
 
-.ifndef CART                      ; the cartridge has the scope's tiles once
+.ifndef CART                      ; the cartridge has these tiles once
 .segment "CHR2"
-    .incbin "assets/ldv/ldv_bg.chr"
-    .incbin "build/radar_sprites_16.chr"
+    .incbin "assets/overworld/harbor_a.chr"
+    .incbin "assets/overworld/harbor_b.chr"
 
 .segment "CHR3"
-    .incbin "assets/ldv/ldv_bg.chr"
-    .incbin "build/radar_sprites_16.chr"
+    .incbin "assets/overworld/harbor_a.chr"
+    .incbin "assets/overworld/harbor_b.chr"
 .endif

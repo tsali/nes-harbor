@@ -17,10 +17,8 @@ SRC := $(abspath nes_harbor)
 VENDOR := $(SRC)/vendor/nesp32
 NAME := nes_radar_scope_v3
 ROM := $(BUILD)/nes_harbor.nes
-SPRITES := $(BUILD)/sprites
-METASPRITES := $(SPRITES)/build/metasprites.stamp
-INCLUDES := -I $(abspath $(SPRITES))/build -I $(SRC)/assets/ldv -I $(SRC)/nes -I $(abspath app-nes) -I $(VENDOR) \
-	-I $(abspath $(BUILD)) --bin-include-dir $(abspath $(SPRITES))
+INCLUDES := -I $(SRC)/assets/overworld -I $(SRC)/assets/ldv -I $(SRC)/nes -I $(abspath app-nes) -I $(VENDOR) \
+	-I $(abspath $(BUILD))
 
 .PHONY: all clean proto FORCE
 
@@ -34,12 +32,8 @@ proto: | $(BUILD)
 	$(MAKE) -s -C $(NESP32) BUILD=$(NESP_BUILD) proto
 	cp $(NESP_BUILD)/nesp_proto.inc $(VENDOR)/nesp_proto.inc
 
-$(METASPRITES): | $(BUILD)
-	mkdir -p $(dir $@)
-	$(PYTHON) -B $(SRC)/tools/generate_metasprites.py --output-dir $(dir $@)
-	touch $@
 
-$(BUILD)/nes_harbor.o: $(wildcard $(SRC)/nes/*.s $(SRC)/nes/*.inc $(VENDOR)/*.inc $(SRC)/assets/splash/* $(SRC)/assets/ldv/*) $(METASPRITES)
+$(BUILD)/nes_harbor.o: $(wildcard $(SRC)/nes/*.s $(SRC)/nes/*.inc $(VENDOR)/*.inc $(SRC)/assets/splash/* $(SRC)/assets/ldv/* $(SRC)/assets/overworld/*) | $(BUILD)
 	cd $(SRC) && ca65 -g $(INCLUDES) -o $(abspath $@) nes/$(NAME).s
 
 $(ROM): $(BUILD)/nes_harbor.o $(SRC)/nes/cnrom256.cfg

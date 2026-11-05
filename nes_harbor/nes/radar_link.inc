@@ -295,27 +295,60 @@ radar_messages:
     jmp reset::radar_editor
 .endproc
 
-; The scope: once round a frame. The pad, the link's age, at most one
-; exchange, and the targets drawn again with the next of them in front, so
-; that more than four on a line take turns to be seen.
+; A place chosen: the port card while its first data comes, then the map.
 .proc radar_scope
     jsr initialize_display_buffers
-    jsr initialize_video
     lda #1
     sta radar_chosen
     jsr radar_begin
+    lda #1                      ; water until a map comes
+    jsr map_render_begin
+    lda #$FF
+    sta tag_fetch
+    sta tag_name_slot
+    sta tag_slot_shown
+    lda #STAT_DIRTY_ALL
+    sta status_dirty
+    jsr port_card
+    bcc harbor_map_screen
+    jmp scope_leave
+.endproc
+
+; The map: once round a frame. The pad, the link's age, at most one
+; exchange, and the ships drawn again with the next of them in front, so
+; that more than eight sprites on a line take turns to be seen.
+.proc harbor_map_screen
+    jsr map_video
+    jsr read_controller         ; A still held from the port card or the
+    lda controller_current      ; ship card is no tap
+    sta controller_previous
+    and #BUTTON_A
+    beq :+
+    lda #1
+:
+    sta card_a_was
+    lda #0
+    sta card_armed
+    sta controller_pending
+    lda selected_slot           ; the tag's full name, if it has not come
+    sta tag_slot_shown
+    cmp tag_name_slot
+    beq @frame
+    jsr tag_changed
 @frame:
-    jsr update_selection        ; B asks for the editor
+    jsr update_selection        ; B asks for the picker
     lda navigation_requested
     bne @leave
     lda card_wanted             ; A tapped: the ship's card, then the map again
     beq :+
     jsr ship_card
-    jmp radar_scope
+    jmp harbor_map_screen
 :
     jsr age_link
     bcc :+
-    jsr commit_display          ; ten seconds with nothing: WAITING
+    lda #STAT_DIRTY_ALL         ; ten seconds with nothing: WAITING
+    ora status_dirty
+    sta status_dirty
 :
     lda oam_rotation            ; one frame in eight, what is typed, in
     cmp #KEYS_TURN              ; place of the scene's exchange
@@ -325,57 +358,45 @@ radar_messages:
 @poll:
     jsr radar_poll
 @polled:
-    lda startup_error           ; the nesp32 no longer has the airport, and why
+    lda startup_error           ; the nesp32 no longer has the place, and why
     bne @leave
 
-    lda displayed_count
-    sta packet_count
-    jsr build_oam_shadow
+    jsr build_ship_oam
     jsr tick_link_dots
     bcc :+
-    lda #1
-    sta link_dirty
+    lda #STAT_DIRTY_LINE
+    ora status_dirty
+    sta status_dirty
 :
-    lda selected_slot
-    cmp previous_selected_slot
-    beq @oam_only
-    jsr build_selected_fields
-    jsr commit_selection
-    jmp @advance
-@oam_only:
-    lda link_dirty              ; the dots go with the OAM, not with a selection
+    lda selected_slot           ; another ship chosen: its tag
+    cmp tag_slot_shown
     beq :+
-    lda #0
-    sta link_dirty
-    jsr commit_oam_link
-    jmp @advance
+    sta tag_slot_shown
+    jsr tag_changed
 :
-    jsr commit_oam_map          ; and a row of the map, if one waits
-@advance:
+    jsr commit_map_frame
     inc oam_rotation
     lda oam_rotation
     and #7
     sta oam_rotation
     jmp @frame
-
 @leave:
+    jmp scope_leave
+.endproc
+
+; Back to the picker.
+.proc scope_leave
     lda #0
     sta navigation_requested
     sta active_slots
     sta controller_pending
+    sta ppu_bg
     jmp reset::radar_editor
 .endproc
 
-; The targets' turn in front and the LINK field's dots, in one vblank: the
-; OAM DMA's 520 cycles and nine tiles of the field.
-.proc commit_oam_link
-    jsr begin_vram_update
-    lda #0
-    sta OAMADDR
-    lda #>oam_shadow
-    sta OAMDMA
-    jmp write_link_during_vblank
-.endproc
+.segment "BSS"
+tag_slot_shown: .res 1          ; the slot the name tag is of
+.segment "CODE"
 
 ; Nothing on the screen is the nesp32's yet: ask for the scene at once.
 ; Hello: RADAR, and KBD, for the keys that stand for the controller's
@@ -685,7 +706,7 @@ radar_typed:      .res TYPED_MAX
     bne @named
     lda radar_names_want
     sta radar_names_have
-    jsr build_selected_identity
+    jsr tag_changed             ; new names: the tag's, and its full name again
     lda #1                      ; and now the scene they are the names of
     sta radar_wait
 @named:
@@ -843,9 +864,8 @@ radar_typed:      .res TYPED_MAX
     sta displayed_count
     lda #0
     sta controller_pressed
-    jsr move_selection          ; the selected aircraft may have gone
-    jsr build_oam_shadow
-    jsr build_selected_fields
+    jsr move_selection          ; the selected ship may have gone
+    jsr ships_from_scene
     jsr build_status_fields     ; and the link is LIVE
     lda packet_flags
     and #SCENE_STALE
@@ -858,16 +878,20 @@ radar_typed:      .res TYPED_MAX
     jsr set_link_adsb_down
 :
     jsr note_link_stream        ; and if it is still LIVE, a new scene has come
-    jmp commit_display
+    lda #1
+    sta tag_dirty               ; its speed
+    lda #STAT_DIRTY_LINE | STAT_DIRTY_METER
+    ora status_dirty
+    sta status_dirty
+    rts
 
     ; The records are where the last scene's were, so nothing of that can
-    ; stay on the scope.
+    ; stay on the map.
 @bad:
     jsr clear_target_state
-    lda #<link_bad_data_chars   ; an aircraft or a name that cannot be shown
+    lda #<link_bad_data_chars   ; a ship or a name that cannot be shown
     ldx #>link_bad_data_chars
-    jsr show_link
-    jmp commit_display
+    jmp show_link
 .endproc
 
 .ifdef CART
