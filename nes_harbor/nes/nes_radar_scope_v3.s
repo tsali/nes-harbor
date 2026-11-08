@@ -1376,17 +1376,21 @@ radar_editor:                     ; nes/radar_link.inc comes back here
 ; The title's sea, every eight frames: its wave colours trade places
 ; (palette 1's second and third), just after a vblank has begun.
 .proc shimmer_splash_sea
+    ; Gentle 4-step colour cycle, one step every 16 frames (~0.27 s):
+    ; dark/mid/light/mid blue so the sea rolls instead of strobing.
     lda splash_frames
-    and #7
+    and #15
     bne @done
-    ldx #$11
-    ldy #$21
     lda splash_frames
-    and #8
-    beq :+
-    ldx #$21
-    ldy #$11
-:
+    lsr
+    lsr
+    lsr
+    lsr
+    and #3
+    tax
+    ldy shimmer_b,x
+    lda shimmer_a,x
+    tax
     bit PPUSTATUS
     lda #$3F
     sta PPUADDR
@@ -1402,6 +1406,9 @@ radar_editor:                     ; nes/radar_link.inc comes back here
 @done:
     rts
 .endproc
+shimmer_a: .byte $01, $11, $21, $11
+shimmer_b: .byte $21, $11, $01, $11
+
 
 ; A:X = PPU address high:low, field_src = source character indices,
 ; Y = fixed width, field_font = font base. Every call writes exactly Y tiles.
@@ -1688,31 +1695,26 @@ radar_editor:                     ; nes/radar_link.inc comes back here
 ; The splash for SPLASH_FRAMES, or until Start. On nesp32's cartridge it is
 ; not skipped: the Start that chose NES Radar from the menu is still held.
 .proc wait_splash
-    lda #SPLASH_FRAMES
+    ; Title stays up until START is pressed (no timeout), sea animates slowly.
+    lda #0
     sta splash_frames
 @frame:
     jsr wait_vblank
+    inc splash_frames
     jsr shimmer_splash_sea
-.ifdef CART
-    dec splash_frames
-    bne @frame
-    rts
-.else
     jsr read_controller
     lda controller_current
     and #BUTTON_START
-    bne @release
-    dec splash_frames
-    bne @frame
-    rts
+    beq @frame
 @release:
     jsr wait_vblank
+    inc splash_frames
+    jsr shimmer_splash_sea
     jsr read_controller
     lda controller_current
     and #BUTTON_START
     bne @release
     rts
-.endif
 .endproc
 
 .include "harbor_data.inc"
