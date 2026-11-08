@@ -709,22 +709,15 @@ radar_editor:                     ; nes/radar_link.inc comes back here
     sta controller_pressed
     lda #0
     sta controller_pending
-.ifdef CART
-    lda controller_pressed
-    and #BUTTON_SELECT
-    beq :+
-    jmp to_cart_menu
-:
-.endif
-    lda controller_pressed
-    and #BUTTON_B
+    lda controller_pressed      ; SELECT: back a step, to the port editor
+    and #BUTTON_SELECT          ; (on the cart, Select there is its menu)
     beq :+
     lda #1
     sta navigation_requested
     rts
 :
-    lda controller_current      ; A held: the pad moves the place
-    and #BUTTON_A
+    lda controller_current      ; B held: the pad moves the place (Rai 11/8)
+    and #BUTTON_B
     beq @not_pan
     lda controller_pressed
     and #PAD_DIRECTIONS
@@ -753,10 +746,15 @@ radar_editor:                     ; nes/radar_link.inc comes back here
     jsr scope_rerange
 @ranged:
     lda #<~(BUTTON_LEFT | BUTTON_RIGHT)
-    ldx controller_current      ; UP and DOWN choose the ship, unless A is held
-    bpl :+                      ; (BUTTON_A is bit 7)
+    pha
+    lda controller_current      ; UP and DOWN choose the ship, unless B is held
+    and #BUTTON_B
+    beq :+
+    pla
     lda #<~PAD_DIRECTIONS
+    pha
 :
+    pla
     and controller_pressed
     sta controller_pressed
     jmp move_selection

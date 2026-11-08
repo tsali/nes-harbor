@@ -46,9 +46,9 @@ On the map:
 | Up / Down | pick a ship |
 | A (tap) | the ship's card: name, MMSI, IMO, call sign, flag, type, status, destination, ETA, size, draft, speed, course, heading, position |
 | Left / Right | range, at once |
-| A held + D-pad | move the map a quarter of the range |
+| B held + D-pad | move the map a quarter of the range |
 | B (on a card) | back to the map |
-| B | back to the picker |
+| Select | back to the picker |
 
 After a port is picked, a NOW ENTERING card shows the place, its range
 and, once they come, how many ships there are; the map follows when the
