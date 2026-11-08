@@ -1376,12 +1376,13 @@ radar_editor:                     ; nes/radar_link.inc comes back here
 ; The title's sea, every eight frames: its wave colours trade places
 ; (palette 1's second and third), just after a vblank has begun.
 .proc shimmer_splash_sea
-    ; Gentle 4-step colour cycle, one step every 16 frames (~0.27 s):
+    ; Gentle 4-step colour cycle, one step every 32 frames (~0.53 s):
     ; dark/mid/light/mid blue so the sea rolls instead of strobing.
     lda splash_frames
-    and #15
+    and #31
     bne @done
     lda splash_frames
+    lsr
     lsr
     lsr
     lsr
